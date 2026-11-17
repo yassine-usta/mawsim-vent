@@ -1,0 +1,4 @@
+site/
+sortie/
+__pycache__/
+*.om
