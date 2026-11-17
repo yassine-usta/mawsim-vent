@@ -11,6 +11,8 @@ sont lus, puis découpés en tuiles PNG de 181 x 181 points à trois finesses :
 
 Dans chaque tuile, le nord est en haut ; le rouge porte le vent vers l'est, le vert le vent vers le nord,
 le bleu les rafales. Les valeurs sont codées par une racine (fines près de zéro, voir encode_signed).
+La température, les nuages, la pression et la pluie suivent dans deux autres familles de tuiles ; la mer
+(température de l'eau, courants) dans deux de plus, préparées par mer.py.
 Chaque tuile partage sa dernière ligne et sa dernière colonne avec ses voisines : le téléphone interpole
 sans couture. Le fichier index.json décrit le tout ; il est écrit en dernier.
 
@@ -30,6 +32,8 @@ import urllib.request
 import numpy as np
 from omfiles import OmFileReader
 from PIL import Image
+
+import mer
 
 SOURCE = "https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial"
 VERSION = 1
@@ -141,11 +145,11 @@ def sky_channels(pressure, rain, factor):
     return [high, low, encode_positive(coarser(rain, factor), RAIN_MAX)]
 
 
-def write_tiles(channels_of, native, folder):
-    """Écrit les tuiles des trois niveaux d'une heure pour une famille de grandeurs ([channels_of] rend ses trois
+def write_tiles(channels_of, native, folder, levels=LEVELS):
+    """Écrit les tuiles de chaque niveau d'une heure pour une famille de grandeurs ([channels_of] rend ses trois
     octets par point pour une maille donnée) ; rend le nombre de tuiles et leur poids."""
     count = size = 0
-    for level, step in enumerate(LEVELS):
+    for level, step in enumerate(levels):
         factor = int(round(step / native))
         if factor < 1:
             raise SystemExit(f"la grille du modèle ({native}°) est plus large que le niveau {level} ({step}°)")
@@ -199,6 +203,7 @@ def main():
     parser.add_argument("--cache", help="dossier où garder les fichiers téléchargés (essais)")
     parser.add_argument("--limit", type=int, default=0, help="nombre d'heures à préparer (essais) ; 0 : toutes")
     parser.add_argument("--published", help="adresse de l'index déjà publié : rien n'est refait si le calcul est le même")
+    parser.add_argument("--no-sea", action="store_true", help="ne pas préparer la mer (essais)")
     args = parser.parse_args()
 
     started = time.time()
@@ -323,6 +328,9 @@ def main():
             },
         },
     }
+    # La mer (température de l'eau, courants) vient d'autres modèles, à leur rythme : elle s'ajoute si elle est là.
+    if not args.no_sea:
+        index["layers"].update(mer.prepare(args.out, work, sys.modules[__name__], keep_files=bool(args.cache), limit=abs(args.limit)))
     with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as out:
         json.dump(index, out, ensure_ascii=False, indent=1)
     print(f"Terminé : {len(done)} heures, {tiles} tuiles, {weight / 1048576:.0f} Mo, en {time.time() - started:.0f} s.")

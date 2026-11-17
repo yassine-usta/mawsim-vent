@@ -29,6 +29,24 @@ Le nord est en haut. Chaque tuile partage sa dernière ligne et sa dernière col
 Codage par une racine, fin près de zéro : pour le rouge et le vert, `x = (octet - 127,5) / 127,5`, puis
 `valeur = signe(x) * x² * 50` ; pour le bleu, `x = octet / 255`, puis `valeur = x² * 70`.
 
+## La mer
+
+`mer.py` ajoute deux familles de tuiles, prises dans les modèles océaniques de Météo-France que publie
+Open-Meteo (un douzième de degré, mondiaux) :
+
+- `m/` : température de l'eau, toutes les 6 heures. Rouge et vert : centièmes de degré depuis -5 °C, sur
+  deux octets (fort puis faible).
+- `c/` : courants de surface, toutes les 3 heures. Rouge : courant vers l'est ; vert : courant vers le nord,
+  de -3 à 3 m/s, codés par la même racine que le vent.
+
+Dans les deux, le bleu dit si le point a une valeur (255) ou non (0) : la terre n'en a pas. Les valeurs sont
+prolongées de trois mailles vers la terre, pour que l'application colorie la mer jusqu'à la vraie côte et
+efface elle-même ce qui dépasse.
+
+La mer a un niveau de plus que le vent, le niveau 3, au douzième de degré : tuiles de 15° de côté (288 pour
+le monde). `index.json` décrit ces familles sous `layers.sea` et `layers.current`, avec leurs propres
+niveaux et leurs heures. Une famille qui n'a pas pu être préparée est simplement absente de l'index.
+
 ## Essayer sur son ordinateur
 
 ```
