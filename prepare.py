@@ -35,6 +35,10 @@ SOURCE = "https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial"
 VERSION = 1
 U_MAX = 50.0  # m/s : au-delà, la valeur est plafonnée (180 km/h)
 GUST_MAX = 70.0  # m/s (252 km/h)
+TEMPERATURE_LOW = -90.0  # °C
+PRESSURE_LOW = 850.0  # hPa
+RAIN_MAX = 60.0  # mm par heure
+HOURLY_UNTIL = {"dwd_icon": 78}  # heures après le calcul où le modèle passe de l'heure aux trois heures
 CELLS = 180  # mailles par côté de tuile
 LEVELS = (1.0, 0.5, 0.25)  # maille de chaque niveau, en degrés
 HOURLY_HOURS = 48  # heure par heure jusque-là, puis toutes les trois heures
@@ -79,6 +83,13 @@ def encode_positive(values, top):
     return np.round(255.0 * np.sqrt(np.clip(values / top, 0.0, 1.0))).astype(np.uint8)
 
 
+def encode_wide(values, low, quantum):
+    """Valeur sur deux octets (fort puis faible) : pas de [quantum] à partir de [low]. Pour la température et la pression,
+    qu'un seul octet arrondirait trop."""
+    steps = np.clip(np.round((values - low) / quantum), 0, 65535).astype(np.uint16)
+    return (steps >> 8).astype(np.uint8), (steps & 255).astype(np.uint8)
+
+
 def read_field(reader, name):
     variable = reader.get_child_by_name(name)
     return np.asarray(variable.read_array((slice(None), slice(None))), dtype=np.float32)
@@ -112,22 +123,41 @@ def coarser(field, factor, peak=False):
     return np.max(windows, axis=0) if peak else np.mean(windows, axis=0)
 
 
-def write_tiles(u, v, gust, native, folder):
-    """Écrit les tuiles des trois niveaux d'une heure ; rend le nombre de tuiles et leur poids."""
+def wind_channels(u, v, gust, factor):
+    """Rouge : vent vers l'est ; vert : vent vers le nord ; bleu : rafales (le maximum de la zone)."""
+    return [encode_signed(coarser(u, factor), U_MAX), encode_signed(coarser(v, factor), U_MAX), encode_positive(coarser(gust, factor, peak=True), GUST_MAX)]
+
+
+def air_channels(temperature, cloud, factor):
+    """Rouge et vert : température sur deux octets (dixièmes de degré depuis -90 °C) ; bleu : nébulosité (0 à 100 %, pas de 0,4)."""
+    high, low = encode_wide(coarser(temperature, factor), TEMPERATURE_LOW, 0.1)
+    return [high, low, np.round(np.clip(coarser(cloud, factor), 0.0, 100.0) * 2.5).astype(np.uint8)]
+
+
+def sky_channels(pressure, rain, factor):
+    """Rouge et vert : pression au niveau de la mer sur deux octets (dixièmes d'hectopascal depuis 850 hPa) ; bleu : pluie
+    de l'heure (mm par heure, codée par une racine jusqu'à 60)."""
+    high, low = encode_wide(coarser(pressure, factor), PRESSURE_LOW, 0.1)
+    return [high, low, encode_positive(coarser(rain, factor), RAIN_MAX)]
+
+
+def write_tiles(channels_of, native, folder):
+    """Écrit les tuiles des trois niveaux d'une heure pour une famille de grandeurs ([channels_of] rend ses trois
+    octets par point pour une maille donnée) ; rend le nombre de tuiles et leur poids."""
     count = size = 0
     for level, step in enumerate(LEVELS):
         factor = int(round(step / native))
         if factor < 1:
             raise SystemExit(f"la grille du modèle ({native}°) est plus large que le niveau {level} ({step}°)")
         # Une colonne de plus, celle du méridien 180, égale à celle du -180 : la Terre est ronde.
-        layers = [np.concatenate([a, a[:, :1]], axis=1) for a in (coarser(u, factor), coarser(v, factor), coarser(gust, factor, peak=True))]
+        layers = [np.concatenate([a, a[:, :1]], axis=1) for a in channels_of(factor)]
         rows = (layers[0].shape[0] - 1) // CELLS
         cols = (layers[0].shape[1] - 1) // CELLS
         os.makedirs(os.path.join(folder, str(level)), exist_ok=True)
         for row in range(rows):
             for col in range(cols):
                 part = (slice(row * CELLS, (row + 1) * CELLS + 1), slice(col * CELLS, (col + 1) * CELLS + 1))
-                rgb = np.dstack([encode_signed(layers[0][part], U_MAX), encode_signed(layers[1][part], U_MAX), encode_positive(layers[2][part], GUST_MAX)])
+                rgb = np.dstack([layer[part] for layer in layers])
                 # Ligne 0 du fichier : le sud. Dans l'image, le nord est en haut.
                 path = os.path.join(folder, str(level), f"{row}-{col}.png")
                 Image.fromarray(rgb[::-1], "RGB").save(path, optimize=True)
@@ -202,7 +232,7 @@ def main():
     os.makedirs(args.out)
     work = args.cache or tempfile.mkdtemp(prefix="vent-")
     os.makedirs(work, exist_ok=True)
-    done, tiles, weight, native = [], 0, 0, None
+    done, done_air, done_sky, tiles, weight, native = [], [], [], 0, 0, None
     for valid, origin in times:
         name = f"{valid:%Y%m%d%H}"
         local = os.path.join(work, f"{args.model}-{origin:%Y%m%d%H}-{name}.om")
@@ -225,6 +255,13 @@ def main():
                 # L'heure du calcul lui-même n'a pas de rafales (elles se mesurent sur l'heure écoulée) :
                 # le vent moyen en tient lieu, jamais moins.
                 gust = np.hypot(u, v)
+            # Les autres grandeurs ; une grandeur absente de cette heure n'empêche pas les autres.
+            extra = {}
+            for key, variable in (("temperature", "temperature_2m"), ("cloud", "cloud_cover"), ("pressure", "pressure_msl"), ("rain", "precipitation")):
+                try:
+                    extra[key] = read_field(reader, variable)
+                except ValueError:
+                    extra[key] = None
             reader.close()
         finally:
             if not args.cache:
@@ -236,8 +273,22 @@ def main():
             print(f"  {valid:%d/%m %H h} : valeurs manquantes, heure écartée", flush=True)
             continue
         gust = np.where(np.isnan(gust), np.hypot(u, v), gust)
-        count, size = write_tiles(u, v, gust, native, os.path.join(args.out, "t", name))
+        count, size = write_tiles(lambda factor: wind_channels(u, v, gust, factor), native, os.path.join(args.out, "t", name))
         done.append(valid)
+        extra = {key: (full_circle(a, native) if a is not None and not np.isnan(a).any() else None) for key, a in extra.items()}
+        temperature, cloud, pressure, rain = (extra[key] for key in ("temperature", "cloud", "pressure", "rain"))
+        if temperature is not None and cloud is not None:
+            more = write_tiles(lambda factor: air_channels(temperature, cloud, factor), native, os.path.join(args.out, "a", name))
+            count, size = count + more[0], size + more[1]
+            done_air.append(valid)
+        if pressure is not None:
+            # La pluie du fichier est celle du pas écoulé : une heure, puis trois heures au-delà de l'horaire du modèle.
+            hours = round((valid - origin).total_seconds() / 3600)
+            span = 1.0 if hours <= HOURLY_UNTIL.get(args.model, 10_000) else 3.0
+            rate = np.zeros_like(pressure) if rain is None else rain / span
+            more = write_tiles(lambda factor: sky_channels(pressure, rate, factor), native, os.path.join(args.out, "s", name))
+            count, size = count + more[0], size + more[1]
+            done_sky.append(valid)
         tiles += count
         weight += size
         print(f"  {valid:%d/%m %H h} : {count} tuiles, {size / 1024:.0f} Ko ({time.time() - started:.0f} s)", flush=True)
@@ -256,6 +307,21 @@ def main():
         "levels": [{"id": i, "step": step, "span": step * CELLS, "rows": int(round(180 / (step * CELLS))), "cols": int(round(360 / (step * CELLS)))} for i, step in enumerate(LEVELS)],
         "path": "t/{time}/{level}/{row}-{col}.png",
         "times": [f"{valid:%Y-%m-%dT%H:%MZ}" for valid in done],
+        # Les autres grandeurs, mêmes tuiles et mêmes niveaux que le vent. Deux octets : fort (rouge) puis faible (vert).
+        "layers": {
+            "air": {
+                "path": "a/{time}/{level}/{row}-{col}.png",
+                "times": [f"{valid:%Y-%m-%dT%H:%MZ}" for valid in done_air],
+                "temperature": {"channels": "red,green", "low": TEMPERATURE_LOW, "quantum": 0.1, "unit": "°C"},
+                "cloud": {"channel": "blue", "scale": 2.5, "unit": "%"},
+            },
+            "sky": {
+                "path": "s/{time}/{level}/{row}-{col}.png",
+                "times": [f"{valid:%Y-%m-%dT%H:%MZ}" for valid in done_sky],
+                "pressure": {"channels": "red,green", "low": PRESSURE_LOW, "quantum": 0.1, "unit": "hPa"},
+                "rain": {"channel": "blue", "kind": "sqrt", "max": RAIN_MAX, "unit": "mm/h"},
+            },
+        },
     }
     with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as out:
         json.dump(index, out, ensure_ascii=False, indent=1)
