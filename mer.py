@@ -7,9 +7,11 @@ au douzième de degré, mondiaux. Les fichiers sont légers (2 et 6 Mo par heure
 Deux différences avec le vent :
 
   - la mer a un niveau de plus, au douzième de degré (la maille du modèle) : tuiles de 15° de côté ;
-  - la terre n'a pas de valeur. Le bleu de chaque tuile dit si le point en a une (255) ou non (0). Les
-    valeurs sont prolongées de quelques mailles vers la terre : le téléphone colorie ainsi la mer jusqu'à
-    la vraie côte, qu'il connaît mieux que le modèle, et efface lui-même ce qui dépasse sur la terre.
+  - la terre n'a pas de valeur. Le bleu de chaque tuile le dit : 0, pas de valeur ; 255, le large (les
+    quatre mailles du modèle autour du point sont en mer) ; 128, une valeur de bord, soit au bord de la mer
+    du modèle, soit prolongée de quelques mailles vers la terre. Le téléphone colorie ainsi la mer jusqu'à
+    la vraie côte, qu'il connaît mieux que le modèle, efface ce qui dépasse sur la terre, et ne garde que
+    les eaux reliées au large : une lagune fermée, que le modèle ne voit pas, reste sans couleur.
 
 Les points du modèle sont au centre de ses mailles (-179,958°, -79,958°...) ; ceux des tuiles sont sur les
 degrés ronds. Chaque point de tuile est donc la moyenne des quatre points du modèle qui l'entourent.
@@ -59,6 +61,16 @@ def lattice(data):
     return out
 
 
+def open_sea(data):
+    """Le large, sur les points des tuiles : 1 là où les quatre mailles du modèle autour du point sont en mer, 0 ailleurs."""
+    here = ~np.isnan(data)
+    west = np.roll(here, 1, axis=1)
+    rows = int(round(180.0 / NATIVE)) + 1
+    out = np.zeros((rows, data.shape[1]), dtype=np.float32)
+    out[FIRST_ROW:FIRST_ROW + data.shape[0] - 1] = here[:-1] & here[1:] & west[:-1] & west[1:]
+    return out
+
+
 def extend(field, cells=SHORE):
     """Prolonge les valeurs de [cells] mailles vers la terre : chaque point vide prend la moyenne de ses voisins."""
     out = field
@@ -84,22 +96,22 @@ def coarser(field, factor):
     ])
 
 
-def valid_channel(field):
-    """Bleu : 255 là où le point a une valeur, 0 ailleurs."""
-    return np.where(np.isnan(field), 0, 255).astype(np.uint8)
+def valid_channel(field, deep):
+    """Bleu : 0 sans valeur ; 255 au large ([deep], la part de large autour du point, vaut au moins la moitié) ; 128 sinon."""
+    return np.where(np.isnan(field), 0, np.where(deep >= 0.5, 255, 128)).astype(np.uint8)
 
 
-def temperature_channels(temperature, factor, encode_wide):
-    """Rouge et vert : température de l'eau sur deux octets (centièmes de degré depuis -5 °C) ; bleu : présence."""
+def temperature_channels(temperature, deep, factor, encode_wide):
+    """Rouge et vert : température de l'eau sur deux octets (centièmes de degré depuis -5 °C) ; bleu : présence et large."""
     field = coarser(temperature, factor)
     high, low = encode_wide(np.nan_to_num(field, nan=TEMPERATURE_LOW), TEMPERATURE_LOW, TEMPERATURE_QUANTUM)
-    return [high, low, valid_channel(field)]
+    return [high, low, valid_channel(field, coarser(deep, factor))]
 
 
-def current_channels(u, v, factor, encode_signed):
-    """Rouge : courant vers l'est ; vert : courant vers le nord (racine signée jusqu'à 3 m/s) ; bleu : présence."""
+def current_channels(u, v, deep, factor, encode_signed):
+    """Rouge : courant vers l'est ; vert : courant vers le nord (racine signée jusqu'à 3 m/s) ; bleu : présence et large."""
     east, north = coarser(u, factor), coarser(v, factor)
-    return [encode_signed(np.nan_to_num(east), CURRENT_MAX), encode_signed(np.nan_to_num(north), CURRENT_MAX), valid_channel(east)]
+    return [encode_signed(np.nan_to_num(east), CURRENT_MAX), encode_signed(np.nan_to_num(north), CURRENT_MAX), valid_channel(east, coarser(deep, factor))]
 
 
 def wanted(valid_times, now, every, ahead, parse_time):
@@ -153,12 +165,16 @@ def prepare(out, work, tools, keep_files=False, limit=0, now=None):
                     if not (keep_files and os.path.exists(local)):
                         tools.download(tools.source_url(model, run, valid), local)
                     if family == "sea":
-                        temperature = extend(lattice(read(local, "sea_surface_temperature")))
-                        channels = lambda factor: temperature_channels(temperature, factor, tools.encode_wide)
+                        raw = read(local, "sea_surface_temperature")
+                        deep = open_sea(raw)
+                        temperature = extend(lattice(raw))
+                        channels = lambda factor: temperature_channels(temperature, deep, factor, tools.encode_wide)
                     else:
-                        u = extend(lattice(read(local, "ocean_u_current")))
+                        raw = read(local, "ocean_u_current")
+                        deep = open_sea(raw)
+                        u = extend(lattice(raw))
                         v = extend(lattice(read(local, "ocean_v_current")))
-                        channels = lambda factor: current_channels(u, v, factor, tools.encode_signed)
+                        channels = lambda factor: current_channels(u, v, deep, factor, tools.encode_signed)
                     count, size = tools.write_tiles(channels, NATIVE, os.path.join(out, folder, name), LEVELS)
                 except Exception as error:  # une heure illisible n'empêche pas les autres
                     print(f"  mer, {family} {valid:%d/%m %H h} : laissée ({error})", flush=True)
@@ -179,7 +195,7 @@ def prepare(out, work, tools, keep_files=False, limit=0, now=None):
                 "model": model,
                 "run": f"{run:%Y-%m-%dT%H:%MZ}",
                 "source": "Open-Meteo (CC BY 4.0), modèle océanique de Météo-France",
-                "valid": {"channel": "blue", "from": 128},
+                "valid": {"channel": "blue", "from": 128, "open_sea": 255},
             }
             if family == "sea":
                 entry["temperature"] = {"channels": "red,green", "low": TEMPERATURE_LOW, "quantum": TEMPERATURE_QUANTUM, "unit": "°C"}

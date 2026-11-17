@@ -39,9 +39,11 @@ Open-Meteo (un douzième de degré, mondiaux) :
 - `c/` : courants de surface, toutes les 3 heures. Rouge : courant vers l'est ; vert : courant vers le nord,
   de -3 à 3 m/s, codés par la même racine que le vent.
 
-Dans les deux, le bleu dit si le point a une valeur (255) ou non (0) : la terre n'en a pas. Les valeurs sont
-prolongées de trois mailles vers la terre, pour que l'application colorie la mer jusqu'à la vraie côte et
-efface elle-même ce qui dépasse.
+Dans les deux, le bleu dit ce que vaut le point : 0, pas de valeur (la terre) ; 255, le large (les quatre
+mailles du modèle autour du point sont en mer) ; 128, une valeur de bord. Les valeurs sont prolongées de
+trois mailles vers la terre, pour que l'application colorie la mer jusqu'à la vraie côte et efface
+elle-même ce qui dépasse. Elle ne garde que les eaux reliées au large : une lagune fermée, que le modèle
+ne voit pas, reste sans couleur.
 
 La mer a un niveau de plus que le vent, le niveau 3, au douzième de degré : tuiles de 15° de côté (288 pour
 le monde). `index.json` décrit ces familles sous `layers.sea` et `layers.current`, avec leurs propres
