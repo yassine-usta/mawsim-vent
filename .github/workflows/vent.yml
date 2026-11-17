@@ -12,6 +12,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 # Un seul passage à la fois ; celui qui tourne va à son terme.
 concurrency:
@@ -29,6 +30,13 @@ jobs:
     outputs:
       publier: ${{ steps.nouveau.outputs.publier }}
     steps:
+      # GitHub coupe les tâches planifiées d'un dépôt resté 60 jours sans activité : réactiver la tâche
+      # à chaque passage la garde en vie, sans commit.
+      - name: Garder la tâche en vie
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/vent.yml/enable" || true
+
       - name: Y a-t-il un nouveau calcul ?
         id: nouveau
         run: |
