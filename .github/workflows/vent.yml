@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "25 * * * *"
   workflow_dispatch:
+    inputs:
+      forcer:
+        description: Refaire les tuiles même si le calcul est déjà publié
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,7 +51,7 @@ jobs:
           calcul=$(echo "$dernier" | jq -r '.reference_time' | cut -c1-16)Z
           en_ligne=$(curl -fsS --max-time 30 "$publie" | jq -r '.run' || echo "aucun")
           echo "Calcul chez Open-Meteo : $calcul (complet : $complet) ; en ligne : $en_ligne"
-          if [ "$complet" = "true" ] && [ "$calcul" != "$en_ligne" ]; then
+          if [ "${{ inputs.forcer }}" = "true" ] || { [ "$complet" = "true" ] && [ "$calcul" != "$en_ligne" ]; }; then
             echo "publier=oui" >> "$GITHUB_OUTPUT"
           else
             echo "publier=non" >> "$GITHUB_OUTPUT"

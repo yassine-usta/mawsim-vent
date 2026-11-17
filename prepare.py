@@ -149,6 +149,19 @@ def wanted_times(run, valid_times):
     return kept
 
 
+def older_times(run, last):
+    """Heures qui manquent au bout du calcul (ceux de 6 h et 18 h UTC s'arrêtent à cinq jours), à prendre dans le
+    calcul d'avant, qui va plus loin : rend ce calcul et ses heures, de trois en trois."""
+    previous = run - dt.timedelta(hours=6)
+    end = previous + dt.timedelta(hours=LAST_HOUR)
+    times = []
+    valid = last + dt.timedelta(hours=3)
+    while valid <= end:
+        times.append(valid)
+        valid += dt.timedelta(hours=3)
+    return previous, times
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prépare les tuiles de vent de Mawsim.")
     parser.add_argument("out", help="dossier de sortie (le site publié)")
@@ -173,10 +186,16 @@ def main():
         except Exception as error:  # premier passage, ou site injoignable : on prépare
             print(f"Index publié illisible ({error}) : on prépare.")
 
-    times = wanted_times(run, latest["valid_times"])
+    times = [(valid, run) for valid in wanted_times(run, latest["valid_times"])]
+    # Le bout de la semaine que ce calcul ne couvre pas vient du calcul précédent : six heures plus vieux,
+    # ce qui ne change presque rien à six ou sept jours d'échéance.
+    previous, older = older_times(run, times[-1][0]) if times else (None, [])
     if args.limit:
         times = times[:args.limit]
-    print(f"Modèle {args.model}, calcul du {run:%d/%m/%Y à %H h} UTC, {len(times)} heures à préparer.", flush=True)
+        older = older[:1] if args.limit < 0 else []
+    times += [(valid, previous) for valid in older]
+    print(f"Modèle {args.model}, calcul du {run:%d/%m/%Y à %H h} UTC, {len(times)} heures à préparer"
+          f" (dont {len(older)} du calcul précédent).", flush=True)
 
     if os.path.isdir(args.out):
         shutil.rmtree(args.out)
@@ -184,11 +203,18 @@ def main():
     work = args.cache or tempfile.mkdtemp(prefix="vent-")
     os.makedirs(work, exist_ok=True)
     done, tiles, weight, native = [], 0, 0, None
-    for valid in times:
+    for valid, origin in times:
         name = f"{valid:%Y%m%d%H}"
-        local = os.path.join(work, f"{args.model}-{run:%Y%m%d%H}-{name}.om")
+        local = os.path.join(work, f"{args.model}-{origin:%Y%m%d%H}-{name}.om")
         if not (args.cache and os.path.exists(local)):
-            download(source_url(args.model, run, valid), local)
+            try:
+                download(source_url(args.model, origin, valid), local)
+            except Exception as error:
+                if origin == run:
+                    raise
+                # Le calcul précédent n'est plus en ligne pour cette heure : la semaine s'arrête plus tôt, sans échec.
+                print(f"  {valid:%d/%m %H h} : introuvable dans le calcul précédent ({error}), heure laissée", flush=True)
+                continue
         try:
             reader = OmFileReader.from_path(local)
             u = read_field(reader, "wind_u_component_10m")
@@ -216,12 +242,13 @@ def main():
         weight += size
         print(f"  {valid:%d/%m %H h} : {count} tuiles, {size / 1024:.0f} Ko ({time.time() - started:.0f} s)", flush=True)
 
-    if len(done) < max(1, len(times) // 2):
+    if len(done) < max(1, len([t for t in times if t[1] == run]) // 2):
         raise SystemExit("Moins de la moitié des heures a pu être préparée : rien n'est publié.")
     index = {
         "version": VERSION,
         "model": args.model,
         "run": f"{run:%Y-%m-%dT%H:%MZ}",
+        "completed_from": f"{previous:%Y-%m-%dT%H:%MZ}" if older else None,
         "created": f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%MZ}",
         "source": "Open-Meteo (CC BY 4.0), modèle ICON du DWD" if args.model == "dwd_icon" else f"Open-Meteo (CC BY 4.0), {args.model}",
         "encoding": {"kind": "sqrt", "wind_max": U_MAX, "gust_max": GUST_MAX, "red": "u", "green": "v", "blue": "gust"},
