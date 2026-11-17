@@ -1,0 +1,77 @@
+# Atelier du vent de Mawsim : toutes les heures, regarde si Open-Meteo a publié un nouveau calcul
+# d'ICON ; si oui, prépare les tuiles de vent et les publie sur GitHub Pages. Sinon, s'arrête en
+# quelques secondes.
+name: Vent
+
+on:
+  schedule:
+    - cron: "25 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un seul passage à la fois ; celui qui tourne va à son terme.
+concurrency:
+  group: vent
+  cancel-in-progress: false
+
+env:
+  MODELE: dwd_icon
+  SOURCE: https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial
+
+jobs:
+  preparer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      publier: ${{ steps.nouveau.outputs.publier }}
+    steps:
+      - name: Y a-t-il un nouveau calcul ?
+        id: nouveau
+        run: |
+          publie="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/index.json"
+          dernier=$(curl -fsS --max-time 30 "$SOURCE/$MODELE/latest.json")
+          complet=$(echo "$dernier" | jq -r '.completed')
+          calcul=$(echo "$dernier" | jq -r '.reference_time' | cut -c1-16)Z
+          en_ligne=$(curl -fsS --max-time 30 "$publie" | jq -r '.run' || echo "aucun")
+          echo "Calcul chez Open-Meteo : $calcul (complet : $complet) ; en ligne : $en_ligne"
+          if [ "$complet" = "true" ] && [ "$calcul" != "$en_ligne" ]; then
+            echo "publier=oui" >> "$GITHUB_OUTPUT"
+          else
+            echo "publier=non" >> "$GITHUB_OUTPUT"
+          fi
+          echo "publie=$publie" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        if: steps.nouveau.outputs.publier == 'oui'
+
+      - uses: actions/setup-python@v7
+        if: steps.nouveau.outputs.publier == 'oui'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Préparer les tuiles
+        if: steps.nouveau.outputs.publier == 'oui'
+        run: |
+          pip install --quiet -r requirements.txt
+          python prepare.py site --model "$MODELE"
+
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.nouveau.outputs.publier == 'oui'
+        with:
+          path: site
+
+  publier:
+    needs: preparer
+    if: needs.preparer.outputs.publier == 'oui'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploiement.outputs.page_url }}
+    steps:
+      - id: deploiement
+        uses: actions/deploy-pages@v5
