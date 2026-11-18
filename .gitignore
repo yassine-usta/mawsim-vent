@@ -2,3 +2,4 @@ site/
 sortie/
 __pycache__/
 *.om
+feu-cache/

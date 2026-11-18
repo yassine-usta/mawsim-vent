@@ -49,6 +49,34 @@ La mer a un niveau de plus que le vent, le niveau 3, au douzième de degré : tu
 le monde). `index.json` décrit ces familles sous `layers.sea` et `layers.current`, avec leurs propres
 niveaux et leurs heures. Une famille qui n'a pas pu être préparée est simplement absente de l'index.
 
+## Le feu
+
+`feu.py` ajoute la famille `f/` : le danger de feu, donné par l'indice forêt-météo (FWI, "Fire Weather
+Index"), une image par jour, d'aujourd'hui (UTC) au dernier jour que sert le serveur (dix au plus), datée de
+12 h UTC.
+
+- Rouge et vert : l'indice sur deux octets (fort puis faible), par pas de 0,01 depuis 0 :
+  `indice = (rouge * 256 + vert) * 0,01`.
+- Bleu : 0, pas de valeur (la mer, un lac, le désert ou la glace, que le modèle ne calcule pas) ; 255, pleine
+  terre du modèle (les quatre mailles du serveur autour du point ont une valeur) ; 128, une valeur de bord
+  ou prolongée vers la mer. L'application ne lit une valeur que si le bleu vaut au moins 128.
+
+Les données viennent du serveur cartographique du GWIS (Global Wildfire Information System) du service de
+gestion des urgences de Copernicus : couche `ecmwf.fwi`, calculée par ECMWF, lue en image TIFF du monde
+(5120 x 2560 mailles de 0,07°, 52 Mo par jour, une requête par jour). Dans ce TIFF, la valeur 0 veut dire
+"pas de valeur". Chaque point des tuiles (1/12 de degré) est interpolé entre les quatre mailles qui
+l'entourent, en ne comptant que celles qui ont une valeur, puis les valeurs sont prolongées de deux points
+(environ 18 km) vers la mer : l'application efface ce qui dépasse avec la côte de son fond de carte. Quatre
+niveaux, comme la mer ; environ 330 tuiles et 3 Mo par jour. `index.json` décrit la famille sous
+`layers.fire`.
+
+Le serveur renouvelle ses données une fois par jour, alors que le site est refait à chaque calcul d'ICON :
+la tâche planifiée garde `f/` et son entrée d'index dans un cache (une clé par jour UTC), et `feu.py` les
+reprend tant que le serveur n'a pas publié de jour de plus. Si le serveur du feu ne répond pas, le vent et
+le reste sont publiés quand même, sans la famille `f/` (l'application retombe sur les images du serveur).
+
+Essai, un jour : `python feu.py sortie --days 1`. Essais sans réseau : `python -m unittest test_feu`.
+
 ## Essayer sur son ordinateur
 
 ```
@@ -60,3 +88,10 @@ python prepare.py sortie --limit 2
 
 Données météo : [Open-Meteo](https://open-meteo.com) (CC BY 4.0), modèle ICON du Deutscher Wetterdienst.
 Open-Meteo ne garantit ni l'exactitude ni la continuité de ces fichiers.
+
+Danger de feu : "Contains modified Copernicus Emergency Management Service information 2026" (l'année est
+celle des données ; GWIS, indice forêt-météo calculé par ECMWF). Réutilisation sous licence CC BY 4.0
+([licence des données d'EFFIS et du GWIS](https://forest-fire.emergency.copernicus.eu/about-effis/data-license),
+[conditions du CEMS](https://ewds.climate.copernicus.eu/licences/terms-of-use-cems)). Les valeurs sont
+interpolées et prolongées vers la mer par l'atelier. Elles sont fournies à titre d'information : ce ne sont
+pas des alertes, que seuls les services nationaux peuvent émettre.

@@ -67,11 +67,41 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Le danger de feu ne change qu'une fois par jour : ses tuiles (f/) et leur entrée d'index sont gardées
+      # dans un cache, une clé par jour UTC. feu.py les reprend tant que le serveur n'a rien publié de neuf.
+      - name: Jour UTC du feu
+        id: jour
+        if: steps.nouveau.outputs.publier == 'oui'
+        run: echo "jour=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v6
+        id: feu-avant
+        if: steps.nouveau.outputs.publier == 'oui'
+        with:
+          path: feu-cache
+          key: feu-${{ steps.jour.outputs.jour }}-
+          restore-keys: feu-${{ steps.jour.outputs.jour }}-
+
       - name: Préparer les tuiles
         if: steps.nouveau.outputs.publier == 'oui'
         run: |
           pip install --quiet -r requirements.txt
-          python prepare.py site --model "$MODELE"
+          python prepare.py site --model "$MODELE" --fire-cache feu-cache
+
+      # Une nouvelle clé seulement si les tuiles du feu ont été refaites (leur entrée a changé).
+      - name: Clé du feu
+        id: feu-apres
+        if: steps.nouveau.outputs.publier == 'oui'
+        run: |
+          if [ -f feu-cache/fire.json ]; then
+            echo "cle=feu-${{ steps.jour.outputs.jour }}-$(sha256sum feu-cache/fire.json | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/cache/save@v6
+        if: steps.nouveau.outputs.publier == 'oui' && steps.feu-apres.outputs.cle != '' && steps.feu-apres.outputs.cle != steps.feu-avant.outputs.cache-matched-key
+        with:
+          path: feu-cache
+          key: ${{ steps.feu-apres.outputs.cle }}
 
       - uses: actions/upload-pages-artifact@v5
         if: steps.nouveau.outputs.publier == 'oui'

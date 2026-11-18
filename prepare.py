@@ -12,11 +12,13 @@ sont lus, puis découpés en tuiles PNG de 181 x 181 points à trois finesses :
 Dans chaque tuile, le nord est en haut ; le rouge porte le vent vers l'est, le vert le vent vers le nord,
 le bleu les rafales. Les valeurs sont codées par une racine (fines près de zéro, voir encode_signed).
 La température, les nuages, la pression et la pluie suivent dans deux autres familles de tuiles ; la mer
-(température de l'eau, courants) dans deux de plus, préparées par mer.py.
+(température de l'eau, courants) dans deux de plus, préparées par mer.py ; le danger de feu dans une autre, préparée
+par feu.py une fois par jour (le dossier --fire-cache la garde d'une publication à l'autre).
 Chaque tuile partage sa dernière ligne et sa dernière colonne avec ses voisines : le téléphone interpole
 sans couture. Le fichier index.json décrit le tout ; il est écrit en dernier.
 
-Usage : python prepare.py SORTIE [--model dwd_icon] [--cache DOSSIER] [--limit N] [--published URL]
+Usage : python prepare.py SORTIE [--model dwd_icon] [--cache DOSSIER] [--limit N] [--published URL] [--no-sea]
+        [--no-fire] [--fire-cache DOSSIER]
 """
 import argparse
 import datetime as dt
@@ -33,6 +35,7 @@ import numpy as np
 from omfiles import OmFileReader
 from PIL import Image
 
+import feu
 import mer
 
 SOURCE = "https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial"
@@ -204,6 +207,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="nombre d'heures à préparer (essais) ; 0 : toutes")
     parser.add_argument("--published", help="adresse de l'index déjà publié : rien n'est refait si le calcul est le même")
     parser.add_argument("--no-sea", action="store_true", help="ne pas préparer la mer (essais)")
+    parser.add_argument("--no-fire", action="store_true", help="ne pas préparer le danger de feu (essais)")
+    parser.add_argument("--fire-cache", help="dossier où garder les tuiles du feu du jour d'une publication à l'autre")
     args = parser.parse_args()
 
     started = time.time()
@@ -331,6 +336,9 @@ def main():
     # La mer (température de l'eau, courants) vient d'autres modèles, à leur rythme : elle s'ajoute si elle est là.
     if not args.no_sea:
         index["layers"].update(mer.prepare(args.out, work, sys.modules[__name__], keep_files=bool(args.cache), limit=abs(args.limit)))
+    # Le danger de feu change une fois par jour : gardé dans --fire-cache, il n'est refait que s'il y a du nouveau.
+    if not args.no_fire:
+        index["layers"].update(feu.prepare(args.out, work, sys.modules[__name__], cache=args.fire_cache, days=abs(args.limit)))
     with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as out:
         json.dump(index, out, ensure_ascii=False, indent=1)
     print(f"Terminé : {len(done)} heures, {tiles} tuiles, {weight / 1048576:.0f} Mo, en {time.time() - started:.0f} s.")
