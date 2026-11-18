@@ -4,15 +4,19 @@ Source : le serveur GWIS du service de gestion des urgences de Copernicus (Coper
 Service), couche "ecmwf.fwi", calculée par ECMWF. Une image du monde par jour, d'aujourd'hui à neuf jours :
 5120 x 2560 mailles de 0,0703125°, en nombres réels (environ 52 Mo). Réutilisation permise sous licence
 CC BY 4.0 (politique de réutilisation de la Commission européenne), avec la mention "Contains modified
-Copernicus Emergency Management Service information [année]".
+Copernicus Emergency Management Service information [année]" ; l'index porte sa forme française.
 
-Chaque jour est téléchargé, passé aux points des tuiles (1/12 de degré), prolongé de deux points vers la mer,
-puis écrit en tuiles à quatre finesses par write_tiles de prepare.py :
+Chaque jour est téléchargé, passé aux points des tuiles (1/12 de degré), prolongé de deux points vers la mer
+et vers la mer seulement, puis écrit en tuiles à quatre finesses par write_tiles de prepare.py :
 
   - rouge et vert : l'indice sur deux octets (fort puis faible), par pas de 0,01 depuis 0 ;
-  - bleu : 0, pas de valeur (la mer, un lac, le désert ou la glace, que le modèle ne calcule pas) ; 255,
-    pleine terre du modèle (les quatre mailles du serveur autour du point ont une valeur) ; 128, une valeur
-    de bord ou prolongée vers la mer.
+  - bleu : 0, pas de valeur (la mer, un lac, un chott, le désert ou la glace, que le modèle ne calcule pas) ;
+    255, pleine terre du modèle (les quatre mailles du serveur autour du point ont une valeur) ; 128, une
+    valeur de bord ou prolongée vers la mer.
+
+Le prolongement ne remplit que les points vides à deux points au plus d'un point de mer du modèle océanique
+(masque-mer.png, fabriqué une fois par masque_mer.py) : l'intérieur des terres sans indice (désert, chott, lac,
+glace) reste sans valeur. Sans masque, aucun prolongement ; la famille est publiée quand même.
 
 Valeur "sans donnée" : dans le TIFF du serveur, c'est 0 exactement. Vérifié le 18 novembre 2026 : l'image
 PNG transparente du serveur est transparente sur ces points et seulement sur eux, et le serveur répond
@@ -53,8 +57,10 @@ MAX_DAYS = 10
 TRIES = 4
 PAUSE = 15  # secondes, multipliées par le numéro de l'essai
 USER_AGENT = "Mawsim-atelier/1.0 (fire danger tiles for the Mawsim weather app; one request per forecast day)"
-SOURCE = "GWIS, Copernicus Emergency Management Service ; indice forêt-météo d'ECMWF"
+SOURCE = "Contient des informations modifiées du service Copernicus de gestion des urgences ({years}). Indice forêt-météo d'ECMWF."
 META = "fire.json"
+MASK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "masque-mer.png")
+LATTICE = (int(round(180.0 / NATIVE)) + 1, int(round(360.0 / NATIVE)))  # 2161 lignes, 4320 colonnes
 
 
 def map_url(day, width=WIDTH, height=HEIGHT):
@@ -150,10 +156,50 @@ def fire_channels(value, inland, factor, encode_wide):
     return [high, low, blue]
 
 
-def write_day(raw, folder, tools):
-    """Écrit les tuiles d'un jour depuis l'image du serveur ; rend le nombre de tuiles et leur poids."""
+def sea_mask(path=MASK):
+    """Les points de mer du modèle océanique (ligne 0 au pôle Sud), lus dans masque-mer.png ; None s'il manque."""
+    try:
+        with Image.open(path) as image:
+            sea = np.array(image.convert("L")) > 127
+    except OSError as error:
+        print(f"  feu : masque de mer illisible ({error}), aucun prolongement", flush=True)
+        return None
+    if sea.shape != LATTICE:
+        print(f"  feu : masque de mer de taille inattendue {sea.shape}, aucun prolongement", flush=True)
+        return None
+    return sea[::-1]  # dans l'image, le nord est en haut
+
+
+def near_sea(sea, cells=SHORE):
+    """Les points à [cells] points au plus d'un point de mer (les huit voisins à chaque pas ; la longitude fait le tour)."""
+    near = sea.copy()
+    for _ in range(cells):
+        padded = np.pad(near, ((1, 1), (0, 0)))
+        grown = np.zeros_like(near)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                grown |= np.roll(padded, dx, axis=1)[1 + dy:1 + dy + near.shape[0]]
+        near = grown
+    return near
+
+
+def extend_seaward(field, near, cells=SHORE):
+    """Prolonge les valeurs de [cells] points dans les points vides de [near] seulement : chaque point rempli prend la
+    moyenne de ses voisins qui ont une valeur (comme mer.extend). Ailleurs, un point vide le reste."""
+    out = field
+    for _ in range(cells):
+        padded = np.pad(out, ((1, 1), (0, 0)), constant_values=np.nan)
+        around = [np.roll(padded, dx, axis=1)[1 + dy:1 + dy + out.shape[0]] for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
+        out = np.where(np.isnan(out) & near, mer.nan_mean(around), out)
+    return out
+
+
+def write_day(raw, folder, tools, near=None):
+    """Écrit les tuiles d'un jour depuis l'image du serveur ; rend le nombre de tuiles et leur poids. [near] : les points
+    où le prolongement est permis (près de la mer) ; None, aucun prolongement."""
     value, inland = lattice(no_data(raw))
-    value = mer.extend(value, SHORE)
+    if near is not None:
+        value = extend_seaward(value, near)
     return tools.write_tiles(lambda factor: fire_channels(value, inland, factor, tools.encode_wide), NATIVE, folder, LEVELS)
 
 
@@ -167,13 +213,15 @@ def entry(days):
         "valid": {"channel": "blue", "from": 128, "inland": 255},
         "model": LAYER,
         "run": f"{days[0]:%Y-%m-%d}T00:00Z",
-        "source": SOURCE,
+        "source": SOURCE.format(years=", ".join(sorted({str(day.year) for day in days}))),
     }
 
 
-def build(folder, tools, today, days, tiff=None):
+def build(folder, tools, today, days, tiff=None, mask=MASK):
     """Prépare les jours d'aujourd'hui au dernier que sert le serveur ([days] au plus), une image à la fois. S'arrête au
     premier jour vide, incomplet ou en erreur. Rend les jours faits."""
+    sea = sea_mask(mask)
+    near = None if sea is None else near_sea(sea)
     done, tiles, weight, reference = [], 0, 0, None
     for n in range(days):
         day = today + dt.timedelta(days=n)
@@ -198,7 +246,7 @@ def build(folder, tools, today, days, tiff=None):
             print(f"  feu, {day:%d/%m} : image incomplète ({present} mailles sur {reference}), arrêt", flush=True)
             break
         reference = reference or present
-        count, size = write_day(raw, os.path.join(folder, "f", f"{day:%Y%m%d}12"), tools)
+        count, size = write_day(raw, os.path.join(folder, "f", f"{day:%Y%m%d}12"), tools, near)
         del raw
         done.append(day)
         tiles += count
@@ -250,7 +298,7 @@ def publish(home, out):
     shutil.copytree(os.path.join(home, "f"), target)
 
 
-def prepare(out, work, tools, cache=None, days=MAX_DAYS, today=None, tiff=None, check=probe):
+def prepare(out, work, tools, cache=None, days=MAX_DAYS, today=None, tiff=None, check=probe, mask=MASK):
     """Écrit les tuiles du feu dans [out]/f et rend l'entrée de l'index ({"fire": ...}), ou {} si rien n'a pu être
     préparé : le vent et le reste sont publiés quand même, et l'app garde alors les images du serveur.
 
@@ -268,7 +316,7 @@ def prepare(out, work, tools, cache=None, days=MAX_DAYS, today=None, tiff=None, 
         if os.path.isdir(fresh):
             shutil.rmtree(fresh)
         os.makedirs(fresh)
-        done = build(fresh, tools, today, days, tiff)
+        done = build(fresh, tools, today, days, tiff, mask)
         if not done:
             shutil.rmtree(fresh, ignore_errors=True)
             if kept and kept.get("day") == f"{today:%Y-%m-%d}":

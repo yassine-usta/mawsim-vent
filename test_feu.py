@@ -113,16 +113,63 @@ class NoData(unittest.TestCase):
 
 
 class Extend(unittest.TestCase):
-    def test_two_points_toward_the_sea(self):
+    def test_near_sea_is_two_points_and_wraps(self):
+        sea = np.zeros((20, 60), dtype=bool)
+        sea[10, 0] = True
+        near = feu.near_sea(sea)
+        self.assertEqual(int(near.sum()), 25)  # un carré de 5 x 5 autour du point de mer
+        self.assertTrue(near[8:13, [58, 59, 0, 1, 2]].all())  # par-dessus le méridien 180
+
+    def test_two_points_toward_the_sea_only(self):
         field = np.full((40, 60), np.nan, dtype=np.float32)
-        field[:, :20] = 10.0  # la terre à l'ouest, la mer à l'est
-        field[:, 10:20] = 20.0
-        out = mer.extend(field, feu.SHORE)
-        self.assertTrue(np.allclose(out[:, 20:22], 20.0))
-        self.assertTrue(np.isnan(out[:, 22:58]).all())
-        # La grille fait le tour du monde : la terre déborde aussi vers l'ouest, par l'autre bord.
-        self.assertFalse(np.isnan(out[:, 58:]).any())
-        self.assertTrue(np.array_equal(out[:, :20], field[:, :20]))
+        field[:, 10:20] = 20.0  # terre avec indice ; à l'ouest (colonnes 0 à 9), un désert sans indice
+        sea = np.zeros((40, 60), dtype=bool)
+        sea[:, 20:40] = True  # la mer à l'est de la terre ; au-delà (colonnes 40 à 59), une autre terre sans indice
+        out = feu.extend_seaward(field, feu.near_sea(sea))
+        self.assertTrue(np.allclose(out[:, 20:22], 20.0))  # deux points vers la mer
+        self.assertTrue(np.isnan(out[:, 22:]).all())  # pas plus loin, et rien par l'autre bord
+        self.assertTrue(np.isnan(out[:, :10]).all())  # le désert reste sans valeur
+        self.assertTrue(np.array_equal(out[:, 10:20], field[:, 10:20]))
+
+    def test_desert_on_the_coast_is_filled_near_the_sea_only(self):
+        field = np.full((40, 60), np.nan, dtype=np.float32)
+        field[:, :10] = 5.0
+        sea = np.zeros((40, 60), dtype=bool)
+        sea[:, 13:30] = True  # trois points de désert sans indice entre la terre et la mer
+        out = feu.extend_seaward(field, feu.near_sea(sea))
+        # Les points du désert à deux points au plus de la mer (colonnes 11 et 12) sont remplis ; la colonne 10 ne l'est
+        # pas (trois points de la mer), et sans elle rien ne passe au-delà.
+        self.assertTrue(np.isnan(out[:, 10:]).all())
+        field[:, 10] = 5.0
+        out = feu.extend_seaward(field, feu.near_sea(sea))
+        self.assertTrue(np.allclose(out[:, 11:13], 5.0))
+        self.assertTrue(np.isnan(out[:, 13:]).all())
+
+
+class Mask(unittest.TestCase):
+    def test_missing_or_wrong_mask_gives_none(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertIsNone(feu.sea_mask(os.path.join(folder, "absent.png")))
+            small = os.path.join(folder, "petit.png")
+            Image.fromarray(np.ones((10, 20), dtype=bool)).save(small)
+            self.assertIsNone(feu.sea_mask(small))
+
+    def test_mask_is_read_north_up(self):
+        image = np.zeros(feu.LATTICE, dtype=bool)
+        image[:100] = True  # en haut de l'image : le nord
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "masque.png")
+            Image.fromarray(image).save(path)
+            sea = feu.sea_mask(path)
+        self.assertTrue(sea[-1].all())
+        self.assertFalse(sea[0].any())
+
+    def test_committed_mask_knows_the_sea(self):
+        sea = feu.sea_mask()
+        self.assertIsNotNone(sea, "masque-mer.png manque")
+        for lat, lon, expected in ((36.0, 15.0, True), (0.0, -30.0, True), (33.75, 8.4167, False), (25.0, 10.0, False),
+                                   (36.75, 9.25, False)):
+            self.assertEqual(bool(sea[point(lat, lon)]), expected, (lat, lon))
 
 
 class Channels(unittest.TestCase):
@@ -165,9 +212,33 @@ class Tiles(unittest.TestCase):
             r, g, b = (int(v) for v in image[180 - (row - 9 * 180), col - 12 * 180])
             self.assertAlmostEqual((r * 256 + g) * 0.01, 20.0 + 0.5 * 45.0, places=2)
             self.assertEqual(b, 255)
-            # Le pôle Sud : sans valeur, sauf la frange prolongée.
+            # Le pôle Sud : sans valeur.
             image = np.array(Image.open(os.path.join(folder, "3", "0-0.png")))
             self.assertEqual(int(image[180, 0, 2]), 0)
+
+    def test_extension_needs_the_sea_mask(self):
+        lat, lon = centers()
+        # L'ouest a un indice, l'est n'en a pas. La dernière maille avec indice est centrée à -0,35° : l'interpolation
+        # donne une valeur aux points jusqu'à 0,333° E ; le premier point vide est 0,4167° E.
+        raw = np.where(lon < 0.0, 30.0, 0.0).astype(np.float32)
+        near_coast = np.zeros(feu.LATTICE, dtype=bool)
+        near_coast[:, point(0.0, 0.4167)[1]:point(0.0, 170.0)[1]] = True  # la mer touche la terre
+        far_sea = np.zeros(feu.LATTICE, dtype=bool)
+        far_sea[:, point(0.0, 10.0)[1]:point(0.0, 170.0)[1]] = True  # la mer est loin : un désert entre les deux
+
+        def blue_at(folder, lon_east):
+            # Niveau 3, tuile ligne 6 (0° à 15° N), colonne 12 (0° à 15° E) ; point à 5° N.
+            image = np.array(Image.open(os.path.join(folder, "3", "6-12.png")))
+            return [int(image[180 - 60, int(round(x * 12)), 2]) for x in lon_east]
+
+        points = (0.3333, 0.4167, 0.5, 0.5833)
+        with tempfile.TemporaryDirectory() as folder:
+            cases = {"sans masque": None, "mer proche": feu.near_sea(near_coast), "mer lointaine": feu.near_sea(far_sea)}
+            for name, near in cases.items():
+                feu.write_day(raw, os.path.join(folder, name), prepare, near)
+            self.assertEqual(blue_at(os.path.join(folder, "sans masque"), points), [128, 0, 0, 0])
+            self.assertEqual(blue_at(os.path.join(folder, "mer proche"), points), [128, 128, 128, 0])
+            self.assertEqual(blue_at(os.path.join(folder, "mer lointaine"), points), [128, 0, 0, 0])
 
 
 class Index(unittest.TestCase):
@@ -185,6 +256,10 @@ class Index(unittest.TestCase):
         self.assertEqual(entry["valid"], {"channel": "blue", "from": 128, "inland": 255})
         self.assertEqual(entry["model"], "ecmwf.fwi")
         self.assertEqual(entry["run"], "2026-11-18T00:00Z")
+        self.assertEqual(entry["source"], "Contient des informations modifiées du service Copernicus de gestion des urgences"
+                                          " (2026). Indice forêt-météo d'ECMWF.")
+        across = feu.entry([dt.date(2026, 12, 31), dt.date(2027, 1, 1)])
+        self.assertIn("(2026, 2027)", across["source"])
 
 
 class Cache(unittest.TestCase):
