@@ -203,8 +203,10 @@ def write_day(raw, folder, tools, near=None):
     return tools.write_tiles(lambda factor: fire_channels(value, inland, factor, tools.encode_wide), NATIVE, folder, LEVELS)
 
 
-def entry(days):
-    """L'entrée de l'index (contrat format-tuiles-feu.md) pour les jours préparés."""
+def entry(days, received=None):
+    """L'entrée de l'index (contrat format-tuiles-feu.md) pour les jours préparés. [received] : l'heure à laquelle
+    l'atelier a reçu ces images du serveur ("2026-11-21T09:30Z") ; absente de l'entrée si on ne la donne pas."""
+    fields = {"received": received} if received else {}
     return {
         "path": "f/{time}/{level}/{row}-{col}.png",
         "times": [f"{day:%Y-%m-%d}T12:00Z" for day in days],
@@ -213,6 +215,7 @@ def entry(days):
         "valid": {"channel": "blue", "from": 128, "inland": 255},
         "model": LAYER,
         "run": f"{days[0]:%Y-%m-%d}T00:00Z",
+        **fields,
         "source": SOURCE.format(years=", ".join(sorted({str(day.year) for day in days}))),
     }
 
@@ -289,6 +292,15 @@ def still_fresh(meta, today, days, check=probe):
     return check(last + dt.timedelta(days=1)) is not True
 
 
+def kept_entry(meta):
+    """L'entrée d'index des tuiles gardées. Un cache fait avant que l'entrée porte [received] la reçoit de sa date de
+    fabrication ([built])."""
+    kept = dict(meta["entry"])
+    if "received" not in kept and meta.get("built"):
+        kept["received"] = meta["built"][:16] + "Z"
+    return kept
+
+
 def publish(home, out):
     if os.path.abspath(home) == os.path.abspath(out):
         return
@@ -311,7 +323,7 @@ def prepare(out, work, tools, cache=None, days=MAX_DAYS, today=None, tiff=None, 
         if kept and not tiff and still_fresh(kept, today, days, check):
             print(f"  feu : tuiles du {kept['day']} reprises du cache ({len(kept['entry']['times'])} jours)", flush=True)
             publish(cache, out)
-            return {"fire": kept["entry"]}
+            return {"fire": kept_entry(kept)}
         fresh = os.path.join(work, "feu-neuf")
         if os.path.isdir(fresh):
             shutil.rmtree(fresh)
@@ -322,11 +334,12 @@ def prepare(out, work, tools, cache=None, days=MAX_DAYS, today=None, tiff=None, 
             if kept and kept.get("day") == f"{today:%Y-%m-%d}":
                 print("  feu : serveur en échec, tuiles du jour reprises du cache", flush=True)
                 publish(cache, out)
-                return {"fire": kept["entry"]}
+                return {"fire": kept_entry(kept)}
             print("  feu : aucun jour préparé, famille laissée", flush=True)
             return {}
         # [built] change à chaque calcul : la tâche planifiée sait ainsi qu'il faut garder ce nouveau cache.
-        meta = {"day": f"{today:%Y-%m-%d}", "built": f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}", "entry": entry(done)}
+        built = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}"
+        meta = {"day": f"{today:%Y-%m-%d}", "built": built, "entry": entry(done, received=built[:16] + "Z")}
         with open(os.path.join(fresh, META), "w", encoding="utf-8") as target:
             json.dump(meta, target, ensure_ascii=False, indent=1)
         home = fresh

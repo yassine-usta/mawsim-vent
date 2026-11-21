@@ -138,71 +138,78 @@ def levels():
     return [{"id": i, "step": step, "span": step * 180, "rows": int(round(1 / step)), "cols": int(round(2 / step))} for i, step in enumerate(LEVELS)]
 
 
-def prepare(out, work, tools, keep_files=False, limit=0, now=None):
-    """Écrit les tuiles de la mer dans [out] et rend leurs entrées pour l'index. Une famille qui échoue est
-    laissée de côté : le vent et le reste sont publiés quand même, et l'app garde alors les cartes de Copernicus.
+PLANS = {
+    # famille : (dossier des tuiles, modèle, une heure sur combien, heures d'avance)
+    "sea": ("m", TEMPERATURE_MODEL, 6, TEMPERATURE_AHEAD),
+    "current": ("c", CURRENT_MODEL, 3, CURRENT_AHEAD),
+}
 
-    [tools] : les fonctions de prepare.py (fetch_json, parse_time, source_url, download, write_tiles, encode_wide,
-    encode_signed)."""
+
+def prepare_family(out, work, tools, family, keep_files=False, limit=0, now=None):
+    """Écrit les tuiles d'une famille de la mer ("sea" : température de l'eau ; "current" : courants) dans [out] et rend
+    son entrée d'index, ou None si elle n'a pas pu être préparée : le vent et le reste sont publiés quand même, et
+    l'app garde alors les cartes de Copernicus.
+
+    [tools] : les fonctions de outils.py (fetch_json, parse_time, source_url, download, write_tiles, encode_wide,
+    encode_signed, format_time)."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    layers = {}
-    plans = (
-        ("sea", "m", TEMPERATURE_MODEL, 6, TEMPERATURE_AHEAD),
-        ("current", "c", CURRENT_MODEL, 3, CURRENT_AHEAD),
-    )
-    for family, folder, model, every, ahead in plans:
-        try:
-            latest = tools.fetch_json(f"{tools.SOURCE}/{model}/latest.json")
-            run = tools.parse_time(latest["reference_time"])
-            times = wanted(latest["valid_times"], now, every, ahead, tools.parse_time)
-            if limit:
-                times = times[:limit]
-            done, tiles, weight = [], 0, 0
-            for valid in times:
-                name = f"{valid:%Y%m%d%H}"
-                local = os.path.join(work, f"{model}-{run:%Y%m%d%H}-{name}.om")
-                try:
-                    if not (keep_files and os.path.exists(local)):
-                        tools.download(tools.source_url(model, run, valid), local)
-                    if family == "sea":
-                        raw = read(local, "sea_surface_temperature")
-                        deep = open_sea(raw)
-                        temperature = extend(lattice(raw))
-                        channels = lambda factor: temperature_channels(temperature, deep, factor, tools.encode_wide)
-                    else:
-                        raw = read(local, "ocean_u_current")
-                        deep = open_sea(raw)
-                        u = extend(lattice(raw))
-                        v = extend(lattice(read(local, "ocean_v_current")))
-                        channels = lambda factor: current_channels(u, v, deep, factor, tools.encode_signed)
-                    count, size = tools.write_tiles(channels, NATIVE, os.path.join(out, folder, name), LEVELS)
-                except Exception as error:  # une heure illisible n'empêche pas les autres
-                    print(f"  mer, {family} {valid:%d/%m %H h} : laissée ({error})", flush=True)
-                    continue
-                finally:
-                    if not keep_files and os.path.exists(local):
-                        os.remove(local)
-                done.append(valid)
-                tiles += count
-                weight += size
-            if not done:
-                print(f"  mer, {family} : aucune heure préparée, famille laissée", flush=True)
+    folder, model, every, ahead = PLANS[family]
+    try:
+        latest = tools.fetch_json(f"{tools.SOURCE}/{model}/latest.json")
+        received = dt.datetime.now(dt.timezone.utc)  # le moment où l'atelier a vu ce calcul chez Open-Meteo
+        run = tools.parse_time(latest["reference_time"])
+        times = wanted(latest["valid_times"], now, every, ahead, tools.parse_time)
+        if limit:
+            times = times[:limit]
+        done, tiles, weight = [], 0, 0
+        for valid in times:
+            name = f"{valid:%Y%m%d%H}"
+            local = os.path.join(work, f"{model}-{run:%Y%m%d%H}-{name}.om")
+            try:
+                if not (keep_files and os.path.exists(local)):
+                    tools.download(tools.source_url(model, run, valid), local)
+                if family == "sea":
+                    raw = read(local, "sea_surface_temperature")
+                    deep = open_sea(raw)
+                    temperature = extend(lattice(raw))
+                    channels = lambda factor: temperature_channels(temperature, deep, factor, tools.encode_wide)
+                else:
+                    raw = read(local, "ocean_u_current")
+                    deep = open_sea(raw)
+                    u = extend(lattice(raw))
+                    v = extend(lattice(read(local, "ocean_v_current")))
+                    channels = lambda factor: current_channels(u, v, deep, factor, tools.encode_signed)
+                count, size = tools.write_tiles(channels, NATIVE, os.path.join(out, folder, name), LEVELS)
+            except Exception as error:  # une heure illisible n'empêche pas les autres
+                print(f"  mer, {family} {valid:%d/%m %H h} : laissée ({error})", flush=True)
                 continue
-            entry = {
-                "path": folder + "/{time}/{level}/{row}-{col}.png",
-                "times": [f"{valid:%Y-%m-%dT%H:%MZ}" for valid in done],
-                "levels": levels(),
-                "model": model,
-                "run": f"{run:%Y-%m-%dT%H:%MZ}",
-                "source": "Open-Meteo (CC BY 4.0), modèle océanique de Météo-France",
-                "valid": {"channel": "blue", "from": 128, "open_sea": 255},
-            }
-            if family == "sea":
-                entry["temperature"] = {"channels": "red,green", "low": TEMPERATURE_LOW, "quantum": TEMPERATURE_QUANTUM, "unit": "°C"}
-            else:
-                entry["current"] = {"east": "red", "north": "green", "kind": "sqrt", "max": CURRENT_MAX, "unit": "m/s"}
-            layers[family] = entry
-            print(f"  mer, {family} : {len(done)} heures, {tiles} tuiles, {weight / 1048576:.1f} Mo", flush=True)
-        except Exception as error:
-            print(f"  mer, {family} : famille laissée ({error})", flush=True)
-    return layers
+            finally:
+                if not keep_files and os.path.exists(local):
+                    os.remove(local)
+            done.append(valid)
+            tiles += count
+            weight += size
+        if not done:
+            print(f"  mer, {family} : aucune heure préparée, famille laissée", flush=True)
+            return None
+        entry = {
+            "path": folder + "/{time}/{level}/{row}-{col}.png",
+            "times": [tools.format_time(valid) for valid in done],
+            "levels": levels(),
+            "model": model,
+            "run": tools.format_time(run),
+            "received": tools.format_time(received),
+        }
+        if latest.get("last_modified_time"):
+            entry["source_modified"] = tools.format_time(tools.parse_time(latest["last_modified_time"]))
+        entry["source"] = "Open-Meteo (CC BY 4.0), modèle océanique de Météo-France"
+        entry["valid"] = {"channel": "blue", "from": 128, "open_sea": 255}
+        if family == "sea":
+            entry["temperature"] = {"channels": "red,green", "low": TEMPERATURE_LOW, "quantum": TEMPERATURE_QUANTUM, "unit": "°C"}
+        else:
+            entry["current"] = {"east": "red", "north": "green", "kind": "sqrt", "max": CURRENT_MAX, "unit": "m/s"}
+        print(f"  mer, {family} : {len(done)} heures, {tiles} tuiles, {weight / 1048576:.1f} Mo", flush=True)
+        return entry
+    except Exception as error:
+        print(f"  mer, {family} : famille laissée ({error})", flush=True)
+        return None
