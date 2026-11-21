@@ -49,14 +49,29 @@ def source_url(model, run, valid):
     return f"{SOURCE}/{model}/{run:%Y/%m/%d/%H%M}Z/{valid:%Y-%m-%dT%H%M}.om"
 
 
+class TruncatedDownload(OSError):
+    """Le serveur a coupé la réponse avant la fin : moins d'octets reçus que son Content-Length."""
+
+
 def download(url, path, tries=4):
-    """Télécharge le fichier entier, en reprenant après une coupure."""
+    """Télécharge le fichier entier, en reprenant après une coupure. Le fichier est écrit à côté (path + ".part") puis
+    renommé : [path] n'existe jamais à moitié, même après un échec. Une réponse plus courte que son Content-Length
+    est refusée (urllib ne le signale pas quand on lit par morceaux) et refaite comme une coupure."""
+    partial = path + ".part"
     for attempt in range(1, tries + 1):
         try:
-            with urllib.request.urlopen(url, timeout=120) as response, open(path, "wb") as out:
-                shutil.copyfileobj(response, out, 1 << 20)
+            with urllib.request.urlopen(url, timeout=120) as response:
+                expected = response.headers.get("Content-Length")
+                with open(partial, "wb") as out:
+                    shutil.copyfileobj(response, out, 1 << 20)
+            received = os.path.getsize(partial)
+            if expected is not None and received != int(expected):
+                raise TruncatedDownload(f"{received} octets reçus sur {expected}")
+            os.replace(partial, path)
             return
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            if os.path.exists(partial):
+                os.remove(partial)
             if attempt == tries:
                 raise
             print(f"  coupure ({error}), nouvel essai dans {5 * attempt} s", flush=True)
