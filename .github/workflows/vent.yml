@@ -119,6 +119,10 @@ jobs:
           path: site
           retention-days: 1
           if-no-files-found: error
+          # Une relance complète du même passage reprend le nom "site" : elle remplace l'artefact au lieu d'échouer.
+          overwrite: true
+          # Les PNG sont déjà compressés : ne pas les recompresser accélère l'envoi.
+          compression-level: 0
 
   publier-pages:
     needs: preparer

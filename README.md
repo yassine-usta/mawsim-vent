@@ -87,6 +87,13 @@ change jamais le nom, le sens ni le format, ni les chemins des tuiles) :
 Pour le feu, `received` est l'heure où les images du jour ont été reçues du GWIS (elle reste la même tant que le
 cache du jour est repris).
 
+Sens de `received` selon la famille :
+
+- ICON (racine, `air`, `sky`) : l'heure où le contrôle du workflow (`vent.yml`, étape "Y a-t-il un nouveau calcul ?") a
+  vu le calcul complet, passée par `--received` ; sans cette option, l'heure où `prepare.py` lit `latest.json` ;
+- mer et courants (`sea`, `current`) : l'heure où la préparation a lu leur `latest.json`, propre à chaque modèle ;
+- feu (`fire`) : l'heure de fabrication des tuiles (`built` de `fire.json`), gardée tant que le cache du jour est repris.
+
 Heures préparées : heure par heure sur 48 h après le calcul, puis toutes les trois heures jusqu'à sept
 jours et demi.
 
