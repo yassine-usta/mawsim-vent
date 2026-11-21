@@ -1,6 +1,12 @@
 # Atelier du vent de Mawsim : toutes les heures, regarde si Open-Meteo a publié un nouveau calcul
 # d'ICON ; si oui, prépare les tuiles de vent et les publie sur GitHub Pages. Sinon, s'arrête en
 # quelques secondes.
+#
+# Deux temps, séparés :
+#   - preparer : le calcul. Écrit le site dans le dossier "site" (prepare.py) et le dépose en artefact "site".
+#   - publier-pages : la publication. Reprend l'artefact, le vérifie (publier.py) et le publie sur GitHub Pages.
+# Un autre hébergement (Cloudflare) s'ajoute comme un job de plus qui reprend le même artefact : voir le modèle en
+# commentaire au bout du fichier.
 name: Vent
 
 on:
@@ -57,6 +63,8 @@ jobs:
             echo "publier=non" >> "$GITHUB_OUTPUT"
           fi
           echo "publie=$publie" >> "$GITHUB_OUTPUT"
+          # L'heure à laquelle l'atelier voit ce calcul complet : elle va dans l'index (champ "received").
+          echo "vu=$(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
         if: steps.nouveau.outputs.publier == 'oui'
@@ -86,7 +94,7 @@ jobs:
         if: steps.nouveau.outputs.publier == 'oui'
         run: |
           pip install --quiet -r requirements.txt
-          python prepare.py site --model "$MODELE" --fire-cache feu-cache
+          python prepare.py site --model "$MODELE" --fire-cache feu-cache --received "${{ steps.nouveau.outputs.vu }}"
 
       # Une nouvelle clé seulement si les tuiles du feu ont été refaites (leur entrée a changé).
       - name: Clé du feu
@@ -103,12 +111,16 @@ jobs:
           path: feu-cache
           key: ${{ steps.feu-apres.outputs.cle }}
 
-      - uses: actions/upload-pages-artifact@v5
+      # Le site préparé, tel quel, pour les jobs de publication (un jour de conservation suffit).
+      - uses: actions/upload-artifact@v7
         if: steps.nouveau.outputs.publier == 'oui'
         with:
+          name: site
           path: site
+          retention-days: 1
+          if-no-files-found: error
 
-  publier:
+  publier-pages:
     needs: preparer
     if: needs.preparer.outputs.publier == 'oui'
     runs-on: ubuntu-latest
@@ -116,5 +128,47 @@ jobs:
       name: github-pages
       url: ${{ steps.deploiement.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: site
+
+      # Vérifie le site (index lisible, tuiles présentes) : un site abîmé n'est pas publié.
+      - name: Vérifier le site
+        run: python publier.py site --cible github-pages
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
       - id: deploiement
         uses: actions/deploy-pages@v5
+
+  # Modèle pour l'hébergement Cloudflare (couloir H) : même artefact, un job de plus, sans toucher à "preparer".
+  # Le regroupement des tuiles (PMTiles) et l'envoi par wrangler vivent dans une cible "cloudflare" de publier.py.
+  #
+  # publier-cloudflare:
+  #   needs: preparer
+  #   if: needs.preparer.outputs.publier == 'oui'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v7
+  #     - uses: actions/setup-python@v7
+  #       with:
+  #         python-version: "3.12"
+  #         cache: pip
+  #     - uses: actions/download-artifact@v8
+  #       with:
+  #         name: site
+  #         path: site
+  #     - run: pip install --quiet -r requirements.txt
+  #     - run: python publier.py site --cible cloudflare
+  #       env:
+  #         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  #         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
