@@ -128,9 +128,6 @@ jobs:
     needs: preparer
     if: needs.preparer.outputs.publier == 'oui'
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploiement.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
 
@@ -151,6 +148,16 @@ jobs:
         with:
           path: site
 
+  # La mise en ligne vit dans un job à part, comme avant F2. Lancée dans le même job, juste après l'envoi de
+  # l'archive des pages, elle ne la trouvait pas encore (passage du 21 novembre 2026 : "No artifacts named
+  # github-pages were found for this workflow run").
+  deployer-pages:
+    needs: publier-pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploiement.outputs.page_url }}
+    steps:
       - id: deploiement
         uses: actions/deploy-pages@v5
 
