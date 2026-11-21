@@ -29,7 +29,7 @@ def make_context(tmp_path, **changes):
 
 class TestListe:
     def test_the_list_is_the_one_in_prepare(self):
-        assert prepare.FAMILIES == ("vent", "air", "ciel", "eau", "courants", "feu")
+        assert prepare.FAMILIES == ("vent", "air", "ciel", "nuages", "precipitations", "soleil", "eau", "courants", "feu")
 
     def test_every_module_of_the_folder_is_listed_and_every_name_has_a_module(self):
         files = {os.path.splitext(os.path.basename(path))[0] for path in glob.glob(os.path.join(HERE, "familles", "*.py"))}
@@ -49,11 +49,11 @@ class TestListe:
         layers = [m.LAYER for m in prepare.load_families()]
         assert len(set(layers)) == len(layers)
         assert layers.count(None) == 1  # seul le vent, la famille historique, est à la racine
-        assert layers == [None, "air", "sky", "sea", "current", "fire"]
+        assert layers == [None, "air", "sky", "clouds", "precipitation", "sun", "sea", "current", "fire"]
 
-    def test_hourly_families_are_the_three_that_read_the_icon_file(self):
+    def test_hourly_families_are_those_that_read_the_icon_file(self):
         hourly = [m.NAME for m in prepare.load_families() if hasattr(m, "write_hour")]
-        assert hourly == ["vent", "air", "ciel"]
+        assert hourly == ["vent", "air", "ciel", "nuages", "precipitations", "soleil"]
 
     def test_a_subset_keeps_the_order_of_the_list(self):
         assert [m.NAME for m in prepare.load_families(["feu", "air", "vent"])] == ["vent", "air", "feu"]
@@ -64,8 +64,8 @@ class TestListe:
 
     def test_options_remove_families(self):
         assert prepare.choose_families() == list(prepare.FAMILIES)
-        assert prepare.choose_families(no_sea=True) == ["vent", "air", "ciel", "feu"]
-        assert prepare.choose_families(no_fire=True) == ["vent", "air", "ciel", "eau", "courants"]
+        assert prepare.choose_families(no_sea=True) == ["vent", "air", "ciel", "nuages", "precipitations", "soleil", "feu"]
+        assert prepare.choose_families(no_fire=True) == ["vent", "air", "ciel", "nuages", "precipitations", "soleil", "eau", "courants"]
         assert prepare.choose_families("air, ciel", no_sea=True) == ["air", "ciel"]
         assert prepare.choose_families("eau,feu", no_sea=True) == ["feu"]
 
@@ -103,7 +103,7 @@ class TestFamilleDeDemonstration:
 
     def test_it_is_loaded_in_the_list(self, demo):
         assert [m.NAME for m in prepare.load_families()][-1] == "demo"
-        assert prepare.choose_families(no_sea=True, no_fire=True) == ["vent", "air", "ciel", "demo"]
+        assert prepare.choose_families(no_sea=True, no_fire=True) == ["vent", "air", "ciel", "nuages", "precipitations", "soleil", "demo"]
 
     def test_its_entry_goes_to_the_index(self, demo, tmp_path):
         ctx = make_context(tmp_path)

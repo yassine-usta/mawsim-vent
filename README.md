@@ -27,13 +27,16 @@ d'index. La liste des familles est `FAMILIES`, dans `prepare.py`, et nulle part 
 | `vent`     | `familles/vent.py`     | ICON : vent à 10 m, rafales         | `t/`   | racine             |
 | `air`      | `familles/air.py`      | ICON : température, nébulosité      | `a/`   | `layers.air`       |
 | `ciel`     | `familles/ciel.py`     | ICON : pression, pluie              | `s/`   | `layers.sky`       |
+| `nuages`   | `familles/nuages.py`   | ICON : nuages bas, moyens, hauts    | `n/`   | `layers.clouds`    |
+| `precipitations` | `familles/precipitations.py` | ICON : pluie, neige, neige roulée | `p/` | `layers.precipitation` |
+| `soleil`   | `familles/soleil.py`   | ICON : rayonnement, ensoleillement  | `r/`   | `layers.sun`       |
 | `eau`      | `familles/eau.py`      | Météo-France : température de l'eau | `m/`   | `layers.sea`       |
 | `courants` | `familles/courants.py` | Météo-France : courants de surface  | `c/`   | `layers.current`   |
 | `feu`      | `familles/feu.py`      | GWIS : danger de feu                | `f/`   | `layers.fire`      |
 
-Les familles `vent`, `air` et `ciel` lisent le même fichier horaire d'ICON : `source_icon.py` le télécharge une
-fois par heure et le prête à chacune. `eau`, `courants` et `feu` ont chacune leur source ; leur logique est dans
-`mer.py` et `feu.py`, les modules de `familles/` en sont l'entrée.
+Les familles `vent`, `air`, `ciel`, `nuages`, `precipitations` et `soleil` lisent le même fichier horaire d'ICON :
+`source_icon.py` le télécharge une fois par heure et le prête à chacune. `eau`, `courants` et `feu` ont chacune leur
+source ; leur logique est dans `mer.py` et `feu.py`, les modules de `familles/` en sont l'entrée.
 
 Options de `prepare.py` : `--limit N` (nombre d'heures, pour les essais), `--cache DOSSIER` (garde les fichiers
 téléchargés), `--no-sea`, `--no-fire`, `--published URL` (rien n'est refait si ce calcul est déjà publié),
@@ -107,6 +110,28 @@ Le nord est en haut. Chaque tuile partage sa dernière ligne et sa dernière col
 
 Codage par une racine, fin près de zéro : pour le rouge et le vert, `x = (octet - 127,5) / 127,5`, puis
 `valeur = signe(x) * x² * 50` ; pour le bleu, `x = octet / 255`, puis `valeur = x² * 70`.
+
+## Nuages, précipitations et soleil
+
+Trois familles horaires d'ICON pour les couches Nuages et Soleil de l'application. Mêmes heures, mêmes niveaux et mêmes
+tuiles que l'air et le ciel. La note de format complète (décodage, plages, exemples) est tenue à côté de l'application.
+
+- `n/` (nuages) : rouge, nuages bas ; vert, moyens ; bleu, hauts. De 0 à 100 %, octet = % x 2,5. Valeurs de l'instant.
+- `p/` (précipitations) : rouge, pluie (pluie et averses) ; vert, neige (en eau) ; bleu, neige roulée (le reste du total
+  d'ICON, gardé au-delà de 0,25 mm sur le pas pour ne pas prendre les arrondis pour de la neige roulée). En mm par heure,
+  moyenne du pas écoulé, racine jusqu'à 60 comme la pluie du ciel : `valeur = (octet / 255)² x 60`. La pluie du ciel (`s/`)
+  reste le total, inchangée.
+- `r/` (soleil) : rouge, rayonnement global (direct + diffus, W/m², octet x 5) ; vert, ensoleillement (minutes de soleil par
+  heure, octet / 4) ; bleu, 0. Moyennes du pas écoulé.
+
+L'ensoleillement n'est pas dans ICON : `familles/soleil.py` le calcule comme Open-Meteo calcule son `sunshine_duration`
+(portage de `Zensun.calculateBackwardsSunshineDuration`) : le rayonnement direct est ramené à un plan perpendiculaire au soleil
+(DNI) avec la hauteur moyenne du soleil sur la partie du pas où il est levé, et la part ensoleillée du pas monte de 0 à 1
+entre 60 et 180 W/m² autour du seuil de 120 W/m² de l'OMM. Sur un pas de trois heures, le rayonnement est d'abord réparti sur
+chaque heure selon la hauteur du soleil, puis l'ensoleillement est compté heure par heure.
+
+L'heure du calcul (la première) n'a ni précipitations ni rayonnement dans le fichier d'ICON : `p/` et `r/` commencent une
+heure plus tard que `n/`.
 
 ## La mer
 
