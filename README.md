@@ -30,12 +30,15 @@ d'index. La liste des familles est `FAMILIES`, dans `prepare.py`, et nulle part 
 | `nuages`   | `familles/nuages.py`   | ICON : nuages bas, moyens, hauts    | `n/`   | `layers.clouds`    |
 | `precipitations` | `familles/precipitations.py` | ICON : pluie, neige, neige roulée | `p/` | `layers.precipitation` |
 | `soleil`   | `familles/soleil.py`   | ICON : rayonnement, ensoleillement  | `r/`   | `layers.sun`       |
+| `poussiere` | `familles/poussiere.py` | CAMS : poussière au sol, épaisseur optique | `d/` | `layers.dust` |
+| `uv`       | `familles/uv.py`       | CAMS : indice UV, indice UV par ciel clair | `u/` | `layers.uv` |
 | `eau`      | `familles/eau.py`      | Météo-France : température de l'eau | `m/`   | `layers.sea`       |
 | `courants` | `familles/courants.py` | Météo-France : courants de surface  | `c/`   | `layers.current`   |
 | `feu`      | `familles/feu.py`      | GWIS : danger de feu                | `f/`   | `layers.fire`      |
 
 Les familles `vent`, `air`, `ciel`, `nuages`, `precipitations` et `soleil` lisent le même fichier horaire d'ICON :
-`source_icon.py` le télécharge une fois par heure et le prête à chacune. `eau`, `courants` et `feu` ont chacune leur
+`source_icon.py` le télécharge une fois par heure et le prête à chacune. `poussiere` et `uv` lisent le fichier horaire de CAMS (`cams_global` chez Open-Meteo, son propre calcul) :
+`source_cams.py` le télécharge une fois par heure pour les deux. `eau`, `courants` et `feu` ont chacune leur
 source ; leur logique est dans `mer.py` et `feu.py`, les modules de `familles/` en sont l'entrée.
 
 Options de `prepare.py` : `--limit N` (nombre d'heures, pour les essais), `--cache DOSSIER` (garde les fichiers
@@ -132,6 +135,27 @@ chaque heure selon la hauteur du soleil, puis l'ensoleillement est compté heure
 
 L'heure du calcul (la première) n'a ni précipitations ni rayonnement dans le fichier d'ICON : `p/` et `r/` commencent une
 heure plus tard que `n/`.
+
+## Poussière et UV (CAMS)
+
+Deux familles tirées de CAMS, le service de surveillance de l'atmosphère de Copernicus (calculé par ECMWF), que publie
+Open-Meteo sous le nom `cams_global` : un calcul toutes les 12 heures (0 h et 12 h UTC), terminé vers 10 h 30 UTC pour celui
+de 0 h, 121 échéances horaires (0 à 120 h), une grille mondiale à 0,4° (451 x 900 points). Ce calcul n'est pas celui d'ICON :
+chaque entrée d'index porte `run`, `received` et `source_modified` de CAMS. La note de format complète (décodage, plages,
+exemples) est tenue à côté de l'application.
+
+- `d/` (poussière) : rouge, poussière près du sol en µg/m³ (`dust`), codée par un logarithme qui garde les quelques µg/m³ des
+  jours calmes et les tempêtes de plusieurs milliers : `valeur = 1 x (exp(octet / 255 x ln(10001)) - 1)`, de 0 à 10000 ; vert,
+  épaisseur optique des aérosols (`aerosol_optical_depth`, racine jusqu'à 5) ; bleu, 0. CAMS ne calcule la poussière que
+  toutes les trois heures (les fichiers des heures intermédiaires ne l'ont pas) : `d/` n'a que les heures rondes de 3 en 3.
+- `u/` (UV) : rouge, indice UV (`uv_index`) ; vert, indice UV par ciel clair (`uv_index_clear_sky`) ; au dixième
+  (`indice = octet / 10`, de 0 à 25,5) ; bleu, 0. Heure par heure sur 48 h à partir du calcul d'ICON, puis toutes les trois
+  heures, comme les familles d'ICON.
+
+Deux niveaux de tuiles seulement, ceux du vent à 1° (niveau 0) et à 0,5° (niveau 1) : la grille de CAMS est à 0,4°, un niveau
+au quart de degré serait du lissage pur. Le niveau 1 est un rééchantillonnage bilinéaire de la source sur la maille de 0,5° ;
+le niveau 0 en est la moyenne 3 x 3. Les heures commencent au calcul d'ICON (celui du vent) : les heures de CAMS d'avant sont
+passées.
 
 ## La mer
 

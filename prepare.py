@@ -42,7 +42,7 @@ from outils import (CELLS, LEVELS, SOURCE, VERSION, coarser, download, encode_po
                     fetch_json, format_time, full_circle, parse_time, source_url, write_tiles)
 
 # LA liste des familles, dans l'ordre où elles apparaissent dans l'index. Un nom de module de familles/.
-FAMILIES = ("vent", "air", "ciel", "nuages", "precipitations", "soleil", "eau", "courants", "feu")
+FAMILIES = ("vent", "air", "ciel", "nuages", "precipitations", "soleil", "poussiere", "uv", "eau", "courants", "feu")
 # Ce que suppriment les options --no-sea et --no-fire.
 SEA = ("eau", "courants")
 FIRE = ("feu",)
