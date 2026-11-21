@@ -3,3 +3,4 @@ sortie/
 __pycache__/
 *.om
 feu-cache/
+.pytest_cache/

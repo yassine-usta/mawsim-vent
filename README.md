@@ -1,19 +1,91 @@
 # Atelier du vent de Mawsim
 
-Prépare le vent mondial en petites tuiles que l'application Mawsim télécharge pour sa carte du vent.
+Prépare les valeurs du monde (vent, air, ciel, mer, feu) en petites tuiles que l'application Mawsim télécharge pour
+sa carte.
 
 ## Ce que fait l'atelier
 
 Toutes les heures, une tâche planifiée regarde si Open-Meteo a publié un nouveau calcul du modèle ICON
-(quatre par jour). Si oui, `prepare.py` :
+(quatre par jour). Si oui, deux temps, séparés :
 
-1. télécharge, heure par heure, le fichier mondial de la prévision (un seul téléchargement par heure) ;
-2. y lit le vent à 10 m et les rafales ;
-3. écrit des tuiles PNG de 181 x 181 points à trois finesses (1°, 0,5° et 0,25°) ;
-4. écrit `index.json`, qui décrit le calcul, les heures et les tuiles.
+1. **Préparer** (`prepare.py`) : télécharge, heure par heure, le fichier mondial de la prévision (un seul
+   téléchargement par heure, partagé par les familles qui le lisent), écrit les tuiles PNG de 181 x 181 points
+   à trois finesses (1°, 0,5° et 0,25°) puis `index.json`, qui décrit le calcul, les heures et les tuiles. Le site
+   est écrit dans un dossier.
+2. **Publier** (`publier.py`) : vérifie ce dossier et le publie sur GitHub Pages (voir "Publication").
 
-Le tout est publié sur GitHub Pages. Un calcul pèse environ 130 Mo. L'application ne télécharge que les
-tuiles de la partie de la carte qu'elle montre : quelques dizaines de Ko par image.
+Un calcul pèse environ 130 Mo. L'application ne télécharge que les tuiles de la partie de la carte qu'elle
+montre : quelques dizaines de Ko par image.
+
+## Les familles
+
+Chaque grandeur est une **famille**, un module du dossier `familles/` qui écrit ses tuiles et rend son entrée
+d'index. La liste des familles est `FAMILIES`, dans `prepare.py`, et nulle part ailleurs.
+
+| Famille    | Module                 | Source                              | Tuiles | Place dans l'index |
+|------------|------------------------|-------------------------------------|--------|--------------------|
+| `vent`     | `familles/vent.py`     | ICON : vent à 10 m, rafales         | `t/`   | racine             |
+| `air`      | `familles/air.py`      | ICON : température, nébulosité      | `a/`   | `layers.air`       |
+| `ciel`     | `familles/ciel.py`     | ICON : pression, pluie              | `s/`   | `layers.sky`       |
+| `eau`      | `familles/eau.py`      | Météo-France : température de l'eau | `m/`   | `layers.sea`       |
+| `courants` | `familles/courants.py` | Météo-France : courants de surface  | `c/`   | `layers.current`   |
+| `feu`      | `familles/feu.py`      | GWIS : danger de feu                | `f/`   | `layers.fire`      |
+
+Les familles `vent`, `air` et `ciel` lisent le même fichier horaire d'ICON : `source_icon.py` le télécharge une
+fois par heure et le prête à chacune. `eau`, `courants` et `feu` ont chacune leur source ; leur logique est dans
+`mer.py` et `feu.py`, les modules de `familles/` en sont l'entrée.
+
+Options de `prepare.py` : `--limit N` (nombre d'heures, pour les essais), `--cache DOSSIER` (garde les fichiers
+téléchargés), `--no-sea`, `--no-fire`, `--published URL` (rien n'est refait si ce calcul est déjà publié),
+`--fire-cache DOSSIER`, et pour les essais `--familles vent,air` (seulement ces familles : un site sans le vent
+n'est pas publiable, `publier.py` le refuse) et `--received AAAA-MM-JJThh:mmZ` (voir "L'index").
+
+### Ajouter une famille
+
+1. Créer `familles/<nom>.py`. Le nom du fichier est le nom de la famille (en français, sans accent).
+2. Y écrire `NAME` (le nom du fichier) et `LAYER` (sa clé dans `index["layers"]`, par exemple `"wave"`), puis l'un
+   des deux contenus :
+   - **famille autonome** (sa propre source, comme la mer ou le feu) : une fonction `prepare(ctx)` qui écrit ses
+     tuiles dans `ctx.out` (par exemple `ctx.out/w/<heure>/<niveau>/<ligne>-<colonne>.png`, avec
+     `outils.write_tiles`) et rend son entrée d'index, ou `None` si rien n'a pu être préparé ;
+   - **famille horaire d'ICON** (elle lit le fichier horaire du modèle, partagé avec le vent) : `FOLDER`,
+     `write_hour(ctx, frame)` (écrit les tuiles de l'heure, lit ses grandeurs par `frame.raw("nom_omfiles")`,
+     rend `(nombre de tuiles, poids)` ou `None` pour laisser l'heure), `entry(ctx, heures)` (son entrée d'index) et
+     `prepare = lambda ctx: source_icon.prepare_alone(sys.modules[__name__], ctx)`. Voir `familles/air.py`.
+3. Ajouter son nom à `FAMILIES` dans `prepare.py`, à la place voulue : c'est la seule ligne à ajouter.
+4. L'entrée d'index rendue porte le gabarit des chemins (`"w/{time}/{level}/{row}-{col}.png"`), les heures
+   (`"times"`, au format `2026-11-21T06:00Z`), les niveaux si ce ne sont pas ceux du vent (`"levels"`), la façon de
+   lire les octets, et les champs de date : `**ctx.provenance(model="...")` donne `run`, `received` et, quand le
+   serveur le dit, `source_modified` (pour une source qui a son propre `latest.json`, passer `latest=` et son
+   `run`). Les champs existants de l'index ne changent jamais de nom, de sens ni de format.
+5. Une famille qui échoue ne retient pas les autres : une exception ou `None` suffit, le passage la laisse de côté
+   et publie le reste.
+6. Écrire ses essais sans réseau en suivant `test_familles.py` (famille de démonstration, faux fichier ICON de
+   `conftest.py`), puis `python -m pytest`.
+
+`ctx` est un `Contexte` (`contexte.py`) : `out` (dossier du site), `work` (téléchargements), `model`, `run` (calcul
+du modèle principal), `received`, `limit`, `keep_files`, `fire_cache`, `now`, `tools` (les outils communs de
+`outils.py`).
+
+## L'index
+
+`index.json` est écrit en dernier. Champs de la racine (l'application installée les lit : on en ajoute, on n'en
+change jamais le nom, le sens ni le format, ni les chemins des tuiles) :
+
+- `version`, `model`, `source`, `encoding`, `tile`, `levels`, `path`, `times` : le vent et son codage ;
+- `completed_from` : le calcul précédent qui complète la fin de la semaine, ou `null` ;
+- `layers` : une entrée par famille autre que le vent (`air`, `sky`, `sea`, `current`, `fire`) ;
+- trois dates, au format `2026-11-21T06:00Z`, pour l'ensemble **et pour chaque famille** :
+  - `run` : l'heure du calcul du modèle ;
+  - `received` (nouveau) : l'heure à laquelle l'atelier a vu ce calcul complet chez Open-Meteo. C'est l'heure du
+    passage de l'atelier : quand celui qui le lance connaît mieux l'instant, il le donne par `--received` (la tâche
+    planifiée y met l'heure de sa vérification) ;
+  - `source_modified` (nouveau, quand le serveur le donne) : la dernière modification de `latest.json` chez
+    Open-Meteo, soit le moment où le calcul s'est terminé ; l'écart avec `received` est le retard de l'atelier ;
+- `created` : l'heure de la publication (racine seulement).
+
+Pour le feu, `received` est l'heure où les images du jour ont été reçues du GWIS (elle reste la même tant que le
+cache du jour est repris).
 
 Heures préparées : heure par heure sur 48 h après le calcul, puis toutes les trois heures jusqu'à sept
 jours et demi.
@@ -82,14 +154,43 @@ la tâche planifiée garde `f/` et son entrée d'index dans un cache (une clé p
 reprend tant que le serveur n'a pas publié de jour de plus. Si le serveur du feu ne répond pas, le vent et
 le reste sont publiés quand même, sans la famille `f/` (l'application retombe sur les images du serveur).
 
-Essai, un jour : `python feu.py sortie --days 1`. Essais sans réseau : `python -m unittest test_feu`.
+Essai, un jour : `python feu.py sortie --days 1`. Essais sans réseau : `python -m pytest` (ou `python -m unittest test_feu`).
+
+## Publication
+
+`prepare.py` ne publie rien : il écrit le site dans un dossier. `publier.py` le vérifie (index lisible, champs de la
+racine, tuiles des premières et dernières heures de chaque famille présentes) puis l'envoie vers une cible. Un
+site abîmé ou sans le vent n'est jamais publié.
+
+```
+python publier.py site --cible github-pages
+python publier.py site --verifier
+```
+
+Dans `.github/workflows/vent.yml`, deux jobs :
+
+- `preparer` : vérifie s'il y a un nouveau calcul, prépare le site (`prepare.py site ...`) et le dépose en
+  artefact `site` ;
+- `publier-pages` : reprend l'artefact, lance `publier.py`, puis publie sur GitHub Pages (`upload-pages-artifact`
+  et `deploy-pages`). Le site publié est celui de la préparation, octet pour octet.
+
+Le déclenchement ne change pas (toutes les heures, et `workflow_dispatch`). Un autre hébergement (Cloudflare,
+fichiers statiques des Workers) s'ajoute sans toucher à la préparation : une cible `cloudflare` dans `publier.py`
+(regroupement des tuiles par famille et par heure, envoi par `wrangler`), une ligne dans `CIBLES`, et un job
+`publier-cloudflare` qui reprend l'artefact `site` (modèle en commentaire au bout de `vent.yml`).
 
 ## Essayer sur son ordinateur
 
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt pytest
 python prepare.py sortie --limit 2
+python prepare.py sortie --limit 2 --familles vent,air --no-fire
+python -m pytest
 ```
+
+`python comparer.py ANCIEN NOUVEAU` compare deux sites préparés : mêmes tuiles octet pour octet, mêmes champs
+d'index (hors `created`), et liste les champs que le nouveau ajoute. C'est la preuve qu'un changement de
+l'atelier ne modifie pas ce que lit l'application.
 
 ## Sources et licence des données
 
