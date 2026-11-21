@@ -127,13 +127,6 @@ def prepare_alone(family, ctx):
     return family.entry(ctx, done) if done else None
 
 
-def prepare_alone(family, ctx):
-    """Le `prepare(ctx)` d'une famille horaire prise seule : télécharge les heures pour elle et rend son entrée d'index
-    (None si aucune heure n'a pu être préparée). Dans un passage complet, prepare.py partage plutôt les fichiers."""
-    done = run_hours(ctx, [family])[family.NAME]
-    return family.entry(ctx, done) if done else None
-
-
 def open_reader(path):
     return OmFileReader.from_path(path)
 
