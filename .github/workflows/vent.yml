@@ -1,13 +1,20 @@
-# Atelier du vent de Mawsim : toutes les heures, regarde si Open-Meteo a publié un nouveau calcul
-# d'ICON ; si oui, prépare les tuiles de vent et les publie sur GitHub Pages. Sinon, s'arrête en
-# quelques secondes.
+# Atelier du vent de Mawsim : regarde si Open-Meteo a publié un nouveau calcul d'ICON ; si oui, prépare les
+# tuiles et les publie (GitHub Pages, et Cloudflare quand il est allumé). Sinon, s'arrête en quelques secondes.
 #
-# Deux temps, séparés :
+# Qui le lance :
+#   - le minuteur de Cloudflare (cloudflare/minuteur), toutes les cinq minutes, par workflow_dispatch, dès qu'un
+#     calcul complet n'est pas en ligne ; il donne la clé du calcul ("icon 2026-11-22T06:00Z") dans l'entrée
+#     "calcul", reprise dans le titre du passage pour qu'il compte ses essais ;
+#   - la tâche planifiée ci-dessous, filet de secours si le minuteur se tait ;
+#   - à la main (workflow_dispatch).
+#
+# Trois temps, séparés :
 #   - preparer : le calcul. Écrit le site dans le dossier "site" (prepare.py) et le dépose en artefact "site".
-#   - publier-pages : la publication. Reprend l'artefact, le vérifie (publier.py) et le publie sur GitHub Pages.
-# Un autre hébergement (Cloudflare) s'ajoute comme un job de plus qui reprend le même artefact : voir le modèle en
-# commentaire au bout du fichier.
+#   - publier-pages (puis deployer-pages) : reprend l'artefact, le vérifie (publier.py) et le publie sur GitHub Pages.
+#   - publier-cloudflare : reprend le même artefact et le publie sur les fichiers statiques des Workers de
+#     Cloudflare (publier.py --cible cloudflare). Il ne tourne que si la variable du dépôt CLOUDFLARE_ACTIF vaut "oui".
 name: Vent
+run-name: ${{ inputs.calcul && format('Vent, {0}', inputs.calcul) || 'Vent' }}
 
 on:
   schedule:
@@ -18,6 +25,10 @@ on:
         description: Refaire les tuiles même si le calcul est déjà publié
         type: boolean
         default: false
+      calcul:
+        description: Calcul que le minuteur a vu (titre du passage, pour compter ses essais)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -48,21 +59,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/vent.yml/enable" || true
 
+      # Le calcul en ligne est lu là où l'app le lira : sur Cloudflare quand il est allumé (son adresse vient d'un
+      # secret, le sous-domaine du compte ne va pas dans ce dépôt public), sinon sur GitHub Pages.
       - name: Y a-t-il un nouveau calcul ?
         id: nouveau
+        env:
+          SOUS_DOMAINE: ${{ vars.CLOUDFLARE_ACTIF == 'oui' && secrets.CLOUDFLARE_SOUS_DOMAINE || '' }}
         run: |
-          publie="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/index.json"
+          if [ -n "$SOUS_DOMAINE" ]; then
+            publie="https://mawsim-index.${SOUS_DOMAINE}/index.json"
+          else
+            publie="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/index.json"
+          fi
           dernier=$(curl -fsS --max-time 30 "$SOURCE/$MODELE/latest.json")
           complet=$(echo "$dernier" | jq -r '.completed')
           calcul=$(echo "$dernier" | jq -r '.reference_time' | cut -c1-16)Z
-          en_ligne=$(curl -fsS --max-time 30 "$publie" | jq -r '.run' || echo "aucun")
+          en_ligne=$(curl -fsS --max-time 30 -A "mawsim-atelier" "$publie" | jq -r '.run' || echo "aucun")
           echo "Calcul chez Open-Meteo : $calcul (complet : $complet) ; en ligne : $en_ligne"
           if [ "${{ inputs.forcer }}" = "true" ] || { [ "$complet" = "true" ] && [ "$calcul" != "$en_ligne" ]; }; then
             echo "publier=oui" >> "$GITHUB_OUTPUT"
           else
             echo "publier=non" >> "$GITHUB_OUTPUT"
           fi
-          echo "publie=$publie" >> "$GITHUB_OUTPUT"
           # L'heure à laquelle l'atelier voit ce calcul complet : elle va dans l'index (champ "received").
           echo "vu=$(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
 
@@ -161,25 +179,35 @@ jobs:
       - id: deploiement
         uses: actions/deploy-pages@v5
 
-  # Modèle pour l'hébergement Cloudflare (couloir H) : même artefact, un job de plus, sans toucher à "preparer".
-  # Le regroupement des tuiles (PMTiles) et l'envoi par wrangler vivent dans une cible "cloudflare" de publier.py.
-  #
-  # publier-cloudflare:
-  #   needs: preparer
-  #   if: needs.preparer.outputs.publier == 'oui'
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #     - uses: actions/setup-python@v7
-  #       with:
-  #         python-version: "3.12"
-  #         cache: pip
-  #     - uses: actions/download-artifact@v8
-  #       with:
-  #         name: site
-  #         path: site
-  #     - run: pip install --quiet -r requirements.txt
-  #     - run: python publier.py site --cible cloudflare
-  #       env:
-  #         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-  #         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  # Cloudflare (fichiers statiques des Workers) : même artefact, un Worker par famille plus un pour l'index (voir
+  # publier.py et le README, "Publication"). Tourne à côté de GitHub Pages pendant la transition ; un échec ici ne
+  # retient pas Pages, et inversement.
+  publier-cloudflare:
+    needs: preparer
+    if: needs.preparer.outputs.publier == 'oui' && vars.CLOUDFLARE_ACTIF == 'oui'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: site
+
+      # Vérifie le site comme pour Pages, regroupe chaque famille dans le dossier de son Worker, puis envoie les
+      # familles (celles qui n'ont pas changé depuis la dernière publication sont laissées) et l'index en dernier.
+      - name: Publier sur Cloudflare
+        run: python publier.py site --cible cloudflare --dossier cloudflare-envoi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_SOUS_DOMAINE: ${{ secrets.CLOUDFLARE_SOUS_DOMAINE }}

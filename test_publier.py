@@ -1,10 +1,14 @@
-"""Essais sans réseau de publier.py : un site abîmé n'est jamais publié."""
+"""Essais sans réseau de publier.py : un site abîmé n'est jamais publié ; la cible cloudflare publie les tuiles de la
+préparation octet pour octet, l'index en dernier, et ne casse pas l'index en ligne quand un envoi échoue."""
+import argparse
 import json
 import os
 import shutil
+import urllib.parse
 
 import pytest
 
+import prepare
 import publier
 
 
@@ -83,9 +87,252 @@ def test_a_family_without_hours_is_refused(site):
 
 
 def test_the_targets_are_listed():
-    assert set(publier.CIBLES) == {"github-pages"}
+    assert set(publier.CIBLES) == {"github-pages", "cloudflare"}
 
 
 def test_a_target_must_be_chosen():
     with pytest.raises(SystemExit):
         publier.main(["site"])
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Cible cloudflare (aucun réseau : l'envoi par wrangler et l'index en ligne sont remplacés).
+
+SUFFIX = "essai.workers.dev"
+
+
+@pytest.fixture
+def suffix(monkeypatch):
+    monkeypatch.setenv("CLOUDFLARE_SOUS_DOMAINE", SUFFIX)
+    return SUFFIX
+
+
+def options(tmp_path, sans_envoi=False, gardees=False):
+    return argparse.Namespace(dossier=str(tmp_path / "envoi"), sans_envoi=sans_envoi, gardees=gardees)
+
+
+class FakeWrangler:
+    """Retient les Workers envoyés, dans l'ordre ; échoue pour ceux qu'on lui donne."""
+
+    def __init__(self, failing=()):
+        self.sent, self.failing = [], set(failing)
+
+    def __call__(self, folder):
+        name = os.path.basename(folder)
+        self.sent.append(name)
+        return name not in self.failing
+
+
+def published_index(envoi):
+    with open(os.path.join(envoi, publier.INDEX_WORKER, "public", "index.json"), encoding="utf-8") as source:
+        return json.load(source)
+
+
+def all_files(folder):
+    return sorted(os.path.relpath(os.path.join(d, f), folder).replace(os.sep, "/") for d, _, files in os.walk(folder) for f in files)
+
+
+def read_bytes(path):
+    with open(path, "rb") as source:
+        return source.read()
+
+
+def level_grid(entry, index):
+    """(lignes, colonnes) de chaque niveau d'une famille : ses niveaux, ou ceux du vent."""
+    levels = entry.get("levels") or index["levels"]
+    return [(int(round(180 / (level["step"] * 180))), int(round(360 / (level["step"] * 180)))) for level in levels]
+
+
+def test_the_workers_follow_the_families():
+    """La table des Workers suit les modules de familles/ : un Worker "mawsim-<nom du module>" par place dans l'index."""
+    for module in prepare.load_families():
+        assert publier.WORKERS[module.LAYER] == module.NAME
+    assert publier.worker_name(None) == "mawsim-vent"
+    assert publier.worker_name("wave") == "mawsim-wave"  # une famille nouvelle prend sa clé d'index
+
+
+def test_cloudflare_round_trip_is_byte_for_byte(site, tmp_path, suffix):
+    """Chaque fichier du site est servi par un seul Worker, au même chemin, avec les mêmes octets ; chaque tuile de
+    l'index se retrouve en suivant base + path de son entrée ; les entrées ne gagnent que base et fingerprint."""
+    envoi = options(tmp_path).dossier
+    assert publier.main([site, "--cible", "cloudflare", "--dossier", envoi, "--sans-envoi"]) == 0
+    index = published_index(envoi)
+
+    served = {}
+    for worker in os.listdir(envoi):
+        public = os.path.join(envoi, worker, "public")
+        for relative in all_files(public):
+            if relative in ("_headers", "index.json"):
+                continue
+            assert relative not in served, f"{relative} servi par deux Workers"
+            served[relative] = worker
+            assert read_bytes(os.path.join(public, *relative.split("/"))) == read_bytes(os.path.join(site, *relative.split("/")))
+    assert sorted(served) == [f for f in all_files(site) if f != "index.json"]
+
+    with open(os.path.join(site, "index.json"), encoding="utf-8") as source:
+        prepared = json.load(source)
+    checked = 0
+    for key, entry in publier.site_families(index):
+        url = urllib.parse.urlsplit(entry["base"])
+        worker = url.hostname.split(".")[0]
+        assert (url.scheme, url.hostname, url.path) == ("https", f"{worker}.{SUFFIX}", "/")
+        for time_text in entry["times"]:
+            for level, (rows, cols) in enumerate(level_grid(entry, index)):
+                for row in range(rows):
+                    for col in range(cols):
+                        relative = os.path.relpath(publier.tile_path(".", entry["path"], time_text, level, row, col), ".")
+                        assert served.get(relative.replace(os.sep, "/")) == worker, f"{key} : {relative} n'est pas chez {worker}"
+                        checked += 1
+        before = prepared if key is None else prepared["layers"][key]
+        after = {name: value for name, value in entry.items() if name not in ("base", "fingerprint", "layers")}
+        assert after == {name: value for name, value in before.items() if name != "layers"}
+    assert checked == len(served)  # chaque fichier servi est une tuile décrite par l'index
+
+
+def test_cloudflare_writes_assets_only_workers(site, tmp_path, suffix):
+    envoi = options(tmp_path).dossier
+    assert publier.cloudflare(site, options(tmp_path, sans_envoi=True)) == 0
+    assert sorted(os.listdir(envoi)) == ["mawsim-air", "mawsim-ciel", "mawsim-index", "mawsim-vent"]
+    for worker in os.listdir(envoi):
+        with open(os.path.join(envoi, worker, "wrangler.json"), encoding="utf-8") as source:
+            config = json.load(source)
+        assert config["name"] == worker
+        assert config["assets"] == {"directory": "./public"} and "main" not in config
+        assert config["workers_dev"] is True
+        with open(os.path.join(envoi, worker, "public", "_headers"), encoding="utf-8") as source:
+            headers = source.read()
+        assert "! Cache-Control" in headers and "Cache-Control: public, max-age=" in headers
+
+
+def test_cloudflare_sends_the_families_then_the_index(site, tmp_path, suffix):
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 0
+    assert wrangler.sent[-1] == "mawsim-index"
+    assert sorted(wrangler.sent[:-1]) == ["mawsim-air", "mawsim-ciel", "mawsim-vent"]
+
+
+def test_an_unchanged_family_is_not_sent_again(site, tmp_path, suffix):
+    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
+    live = published_index(options(tmp_path).dossier)
+    again = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=again, live=live) == 0
+    assert again.sent == ["mawsim-index"]
+
+
+def test_a_changed_tile_changes_the_fingerprint(site, tmp_path, suffix):
+    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
+    live = published_index(options(tmp_path).dossier)
+    tile = os.path.join(site, "a", "2026112106", "0", "0-0.png")
+    data = bytearray(read_bytes(tile))
+    data[-1] ^= 1
+    os.remove(tile)  # le fichier est peut-être lié (lien dur) au dossier d'envoi : on en écrit un nouveau
+    with open(tile, "wb") as out:
+        out.write(data)
+    again = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=again, live=live) == 0
+    assert again.sent == ["mawsim-air", "mawsim-index"]
+
+
+def test_a_failed_layer_keeps_its_online_entry(site, tmp_path, suffix):
+    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
+    live = published_index(options(tmp_path).dossier)
+    live["layers"]["air"]["fingerprint"] = "ancienne"
+    live["layers"]["air"]["run"] = "2026-11-21T00:00Z"
+    wrangler = FakeWrangler(failing={"mawsim-air"})
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live=live) == 1
+    assert wrangler.sent[-1] == "mawsim-index"
+    assert published_index(options(tmp_path).dossier)["layers"]["air"] == live["layers"]["air"]
+
+
+def test_a_failed_layer_without_online_entry_leaves_the_index(site, tmp_path, suffix):
+    wrangler = FakeWrangler(failing={"mawsim-ciel"})
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
+    layers = published_index(options(tmp_path).dossier)["layers"]
+    assert "sky" not in layers and "air" in layers
+
+
+def test_a_failed_wind_never_sends_the_index(site, tmp_path, suffix):
+    wrangler = FakeWrangler(failing={"mawsim-vent"})
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
+    assert "mawsim-index" not in wrangler.sent
+
+
+def test_a_failed_index_is_a_failure(site, tmp_path, suffix):
+    assert publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(failing={"mawsim-index"}), live={}) == 1
+
+
+def test_a_family_over_the_file_limit_sends_nothing(site, tmp_path, suffix, monkeypatch):
+    monkeypatch.setattr(publier, "LIMITE_FICHIERS", 10)
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
+    assert wrangler.sent == []
+
+
+def test_a_file_over_the_size_limit_sends_nothing(site, tmp_path, suffix, monkeypatch):
+    monkeypatch.setattr(publier, "LIMITE_OCTETS", 100)
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
+    assert wrangler.sent == []
+
+
+def test_without_the_account_subdomain_nothing_is_sent(site, tmp_path, monkeypatch):
+    monkeypatch.delenv("CLOUDFLARE_SOUS_DOMAINE", raising=False)
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
+    assert wrangler.sent == []
+    # Sans envoi, une adresse d'exemple suffit.
+    assert publier.cloudflare(site, options(tmp_path, sans_envoi=True)) == 0
+    assert published_index(options(tmp_path).dossier)["base"] == f"https://mawsim-vent.{publier.SOUS_DOMAINE_ESSAI}/"
+
+
+def kept_entry(base="https://mawsim-relief.essai.workers.dev/"):
+    return {"path": "k/{time}/{level}/{row}-{col}.png", "times": ["2026-01-01T00:00Z"], "levels": [{"id": 0, "step": 1.0}],
+            "kept": True, "base": base, "fingerprint": "relief"}
+
+
+def test_a_kept_family_is_carried_from_the_online_index(site, tmp_path, suffix):
+    live = {"run": "2026-11-21T00:00Z", "layers": {"relief": kept_entry(), "old": {"path": "o/{time}"}}}
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live=live) == 0
+    layers = published_index(options(tmp_path).dossier)["layers"]
+    assert layers["relief"] == kept_entry()
+    assert "old" not in layers  # une couche ordinaire disparue du site n'est pas reprise
+    assert "mawsim-relief" not in wrangler.sent
+
+
+def make_kept_site(tmp_path):
+    folder = tmp_path / "relief"
+    tile = folder / "k" / "2026010100" / "0" / "0-0.png"
+    tile.parent.mkdir(parents=True)
+    tile.write_bytes(b"\x89PNG relief")
+    entry = {key: value for key, value in kept_entry().items() if key not in ("base", "fingerprint")}
+    (folder / "index.json").write_text(json.dumps({"layers": {"relief": entry}}), encoding="utf-8")
+    return str(folder)
+
+
+def test_kept_families_are_published_once_into_the_online_index(site, tmp_path, suffix):
+    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
+    live = published_index(options(tmp_path).dossier)
+    kept = make_kept_site(tmp_path)
+    assert publier.check_kept_site(kept) == []
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(kept, options(tmp_path / "k", gardees=True), deploy=wrangler, live=live) == 0
+    assert wrangler.sent == ["mawsim-relief", "mawsim-index"]
+    index = published_index(options(tmp_path / "k").dossier)
+    assert index["layers"]["relief"]["base"] == f"https://mawsim-relief.{SUFFIX}/"
+    assert index["run"] == live["run"] and index["layers"]["air"] == live["layers"]["air"]
+
+
+def test_kept_families_need_the_online_index(tmp_path, suffix):
+    wrangler = FakeWrangler()
+    assert publier.cloudflare(make_kept_site(tmp_path), options(tmp_path, gardees=True), deploy=wrangler, live=None) == 1
+    assert wrangler.sent == []
+
+
+def test_a_kept_site_must_hold_kept_layers_only(site, tmp_path):
+    assert publier.check_kept_site(site)  # un site ordinaire (vent à la racine) est refusé
+    kept = make_kept_site(tmp_path)
+    rewrite_index(kept, lambda index: index["layers"]["relief"].pop("kept"))
+    assert publier.check_kept_site(kept) == ["relief : pas marquée \"kept\": true"]
+    with pytest.raises(SystemExit):
+        publier.main([kept, "--cible", "github-pages", "--gardees"])
