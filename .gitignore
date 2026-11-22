@@ -4,3 +4,7 @@ __pycache__/
 *.om
 feu-cache/
 .pytest_cache/
+.wrangler/
+cloudflare-envoi/
+node_modules/
+.dev.vars
