@@ -1,0 +1,29 @@
+# Minuteur de l'atelier (voir src/index.js). Déployé une fois par l'utilisateur :
+#   npx wrangler deploy --config cloudflare/minuteur/wrangler.toml
+# puis ses deux secrets, rangés par l'utilisateur (jamais dans ce dépôt) :
+#   npx wrangler secret put GITHUB_TOKEN --config cloudflare/minuteur/wrangler.toml
+#   npx wrangler secret put DEPOT --config cloudflare/minuteur/wrangler.toml
+name = "mawsim-minuteur"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+# Pas d'adresse publique : le minuteur ne sert aucune page, il ne fait que tourner sur son cron.
+workers_dev = false
+
+[triggers]
+# Toutes les cinq minutes : un des 5 crons de l'offre gratuite. 288 lancements par jour, chacun de quelques
+# millisecondes de calcul (le temps passé à attendre les serveurs ne compte pas).
+crons = ["*/5 * * * *"]
+
+[vars]
+SOURCE = "https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial"
+GITHUB_API = "https://api.github.com"
+BRANCHE = "main"
+WORKFLOW = "vent.yml"
+
+# L'index publié, lu par une liaison de service : pas d'adresse en workers.dev à connaître ni à écrire ici.
+[[services]]
+binding = "INDEX"
+service = "mawsim-index"
+
+[observability]
+enabled = true
