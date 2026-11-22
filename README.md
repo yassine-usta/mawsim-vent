@@ -263,11 +263,20 @@ pas.
 1. vérifie le site comme pour Pages, puis range chaque famille dans `ENVOI/<worker>/public/` (liens durs vers les
    fichiers du site, ou copies) avec un `wrangler.json` à côté. Une famille de plus de 15 000 fichiers (la marge
    `MARGE_FICHIERS`, sous les 20 000 permis) ou un fichier de plus de 25 Mio arrête tout avant le premier envoi ;
-2. lit l'index en ligne et envoie par `wrangler deploy` les familles dont l'empreinte a changé (le feu, refait une
-   fois par jour, n'est pas renvoyé à chaque calcul), puis l'index, toujours en dernier ;
+2. envoie par `wrangler deploy` les familles qui ont changé, puis l'index, toujours en dernier. Chaque Worker de
+   famille sert un fichier `empreinte.json` (ses tuiles, ses en-têtes et sa configuration) : une famille dont le Worker
+   sert déjà la même empreinte n'est pas renvoyée (le feu, refait une fois par jour), et une empreinte illisible fait
+   envoyer. La décision croit donc ce que sert le Worker, pas l'index ;
 3. si l'envoi d'une famille échoue (deux essais), l'index garde l'entrée en ligne de cette famille, que son Worker
    sert toujours : c'est vrai aussi du vent, dont les champs de la racine restent alors ceux d'avant. Sans entrée en
-   ligne, une couche est retirée de l'index ; pour le vent, l'index n'est pas renvoyé. Le job finit en échec.
+   ligne, une couche est retirée de l'index ; pour le vent, l'index n'est pas renvoyé. Le job finit en échec. Si
+   Cloudflare refuse le jeton, plus rien n'est envoyé dans ce passage, et l'index en ligne n'est pas touché.
+
+wrangler et toutes ses dépendances sont figés par `cloudflare/package.json` et `cloudflare/package-lock.json`, installés
+par `npm ci --prefix cloudflare` (jamais de `npx` sans verrou dans le job). Chaque envoi a 15 minutes au plus, et deux
+essais. Le journal de wrangler est réduit aux avertissements (`WRANGLER_LOG=warn`) : sur un refus du jeton, wrangler
+afficherait sinon le nom du compte dans les journaux publics d'Actions. `publier.py` chronomètre lui-même chaque envoi
+et masque les adresses électroniques qui resteraient.
 
 Au plus gros passage prévu (pas horaire de 78 h), la famille la plus lourde compte 4 746 fichiers (`test_publier.py`
 le vérifie). Le jour où une famille dépassera la marge (par exemple des vagues au douzième de degré, heure par heure),
@@ -277,9 +286,10 @@ l'app lira avant `base`. Une même tuile reste alors toujours dans le même Work
 
 Les chemins portent l'heure de validité, pas le calcul. Entre l'envoi des familles et celui de l'index (les minutes de
 l'envoi), un app qui tient l'index d'avant ne peut manquer que les heures que le nouveau calcul n'a plus : les 6
-premières heures de l'ancien calcul pour les familles d'ICON (et pour l'UV et la poussière, qui partent du même calcul), une heure de l'eau, deux des courants, la veille du feu
-au changement de jour. Toutes sont déjà passées à ce moment-là. Comme l'index part toujours en dernier et garde
-l'entrée en ligne d'une famille ratée, ce trou ne dure jamais plus qu'un passage. Il ne persiste que si le job est
+premières heures de l'ancien calcul pour les familles d'ICON (et pour l'UV et la poussière, qui partent du même
+calcul), une heure de l'eau, deux des courants, la veille du feu au changement de jour. Toutes sont déjà passées à ce moment-là. L'index part toujours en dernier, il garde l'entrée en
+ligne d'une famille ratée, et une famille n'est sautée que si son Worker sert déjà l'empreinte voulue : l'index publié
+ne cite donc que des heures que les Workers servent, hors des minutes de l'envoi. Le trou ne persiste que si le job est
 coupé entre les deux, et seulement jusqu'au passage suivant.
 
 Familles faites une fois (par exemple un relief) : elles auront leur propre Worker, envoyé seulement quand on les
@@ -288,8 +298,11 @@ Worker. Leur publication elle-même reste à écrire avec leur couloir.
 
 Rien de propre au compte n'est écrit dans ce dépôt. Le job lit trois secrets (`CLOUDFLARE_API_TOKEN`,
 `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SOUS_DOMAINE`, ce dernier sous la forme `exemple.workers.dev`) et la variable
-`CLOUDFLARE_ACTIF`. Quand Cloudflare est allumé, l'étape "Y a-t-il un nouveau calcul ?" lit l'index en ligne sur
-`mawsim-index`.
+`CLOUDFLARE_ACTIF`. L'étape "Y a-t-il un nouveau calcul ?" lance `controle.py` : le calcul en ligne est le plus ancien
+des index publiés (Pages, et Cloudflare quand il est allumé ; un index absent compte comme "aucun"), si bien qu'un
+hébergement resté en retard est rattrapé au passage suivant. Pour un passage forcé dont le calcul d'ICON est déjà en
+ligne (relancé pour CAMS), `received` reprend celui de l'index en ligne. Le libellé du sous-domaine est masqué dans
+les journaux. Essais : `test_controle.py` (il lance aussi le script de l'étape avec bash ; PyYAML est nécessaire).
 
 ### Qui lance l'atelier
 
@@ -305,7 +318,10 @@ Il ne lance rien si un passage de `vent.yml` est en attente ou en cours. Il ne l
 même calcul en 12 heures, succès compris, et attend 30 minutes entre deux essais : un échec ne tourne pas en boucle.
 Le titre de chaque passage porte la clé du calcul, ce qui lui permet de compter ses essais sans rien stocker. Ses
 secrets (`GITHUB_TOKEN`, un jeton limité à ce dépôt avec le droit Actions en écriture, et `DEPOT`) sont rangés dans
-le Worker, jamais ici. Essais sans réseau : `node --test cloudflare/minuteur/test/minuteur.test.mjs`.
+le Worker, jamais ici. Il lit l'index de Cloudflare seulement : un Pages resté en retard est rattrapé par la tâche
+planifiée, dont le contrôle prend le plus ancien des deux index. Envoi par l'utilisateur, depuis `cloudflare/` : `npm ci`,
+puis `npx wrangler deploy --config minuteur/wrangler.toml`. Essais sans réseau :
+`node --test cloudflare/minuteur/test/minuteur.test.mjs`.
 
 La tâche planifiée de `vent.yml` reste un filet de secours, si le minuteur se tait.
 

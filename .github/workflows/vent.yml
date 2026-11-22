@@ -59,33 +59,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/vent.yml/enable" || true
 
-      # Le calcul en ligne est lu là où l'app le lira : sur Cloudflare quand il est allumé (son adresse vient d'un
-      # secret, le sous-domaine du compte ne va pas dans ce dépôt public), sinon sur GitHub Pages.
+      # Le dépôt d'abord : le contrôle est dans controle.py (essayé par test_controle.py).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Le calcul en ligne est le plus ancien des index publiés : Pages (que lit l'app installée pendant la transition)
+      # et Cloudflare quand il est allumé. Un hébergement resté en retard est ainsi rattrapé au passage suivant.
+      # L'adresse de Cloudflare vient d'un secret : le sous-domaine du compte ne va pas dans ce dépôt public, et son
+      # libellé est masqué dans les journaux.
       - name: Y a-t-il un nouveau calcul ?
         id: nouveau
         env:
           SOUS_DOMAINE: ${{ vars.CLOUDFLARE_ACTIF == 'oui' && secrets.CLOUDFLARE_SOUS_DOMAINE || '' }}
+          FORCER: ${{ inputs.forcer }}
         run: |
+          pages="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/index.json"
+          set -- --index "$pages"
           if [ -n "$SOUS_DOMAINE" ]; then
-            publie="https://mawsim-index.${SOUS_DOMAINE}/index.json"
-          else
-            publie="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/index.json"
+            echo "::add-mask::${SOUS_DOMAINE%%.*}"
+            set -- "$@" --index "https://mawsim-index.${SOUS_DOMAINE}/index.json"
           fi
-          dernier=$(curl -fsS --max-time 30 "$SOURCE/$MODELE/latest.json")
-          complet=$(echo "$dernier" | jq -r '.completed')
-          calcul=$(echo "$dernier" | jq -r '.reference_time' | cut -c1-16)Z
-          en_ligne=$(curl -fsS --max-time 30 -A "mawsim-atelier" "$publie" | jq -r '.run' || echo "aucun")
-          echo "Calcul chez Open-Meteo : $calcul (complet : $complet) ; en ligne : $en_ligne"
-          if [ "${{ inputs.forcer }}" = "true" ] || { [ "$complet" = "true" ] && [ "$calcul" != "$en_ligne" ]; }; then
-            echo "publier=oui" >> "$GITHUB_OUTPUT"
-          else
-            echo "publier=non" >> "$GITHUB_OUTPUT"
-          fi
-          # L'heure à laquelle l'atelier voit ce calcul complet : elle va dans l'index (champ "received").
-          echo "vu=$(date -u +%Y-%m-%dT%H:%MZ)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v7
-        if: steps.nouveau.outputs.publier == 'oui'
+          if [ "$FORCER" = "true" ]; then set -- "$@" --forcer; fi
+          python3 controle.py --source "$SOURCE" --modele "$MODELE" "$@"
 
       - uses: actions/setup-python@v7
         if: steps.nouveau.outputs.publier == 'oui'
@@ -187,8 +183,13 @@ jobs:
     if: needs.preparer.outputs.publier == 'oui' && vars.CLOUDFLARE_ACTIF == 'oui'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Ce job ne touche pas au dépôt : lecture seule, et aucun identifiant GitHub laissé dans la copie.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7
         with:
@@ -198,15 +199,21 @@ jobs:
         with:
           node-version: "22"
 
+      # wrangler et toutes ses dépendances, figés par cloudflare/package-lock.json (jamais de npx sans verrou).
+      - name: Installer wrangler
+        run: npm ci --prefix cloudflare --no-audit --no-fund
+
       - uses: actions/download-artifact@v8
         with:
           name: site
           path: site
 
-      # Vérifie le site comme pour Pages, regroupe chaque famille dans le dossier de son Worker, puis envoie les
-      # familles (celles qui n'ont pas changé depuis la dernière publication sont laissées) et l'index en dernier.
+      # Vérifie le site comme pour Pages, range chaque famille dans le dossier de son Worker, puis envoie les familles
+      # qui ont changé (d'après l'empreinte écrite dans chaque Worker) et l'index en dernier.
       - name: Publier sur Cloudflare
-        run: python publier.py site --cible cloudflare --dossier cloudflare-envoi
+        run: |
+          echo "::add-mask::${CLOUDFLARE_SOUS_DOMAINE%%.*}"
+          python publier.py site --cible cloudflare --dossier cloudflare-envoi
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

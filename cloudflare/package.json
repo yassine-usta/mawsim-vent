@@ -1,0 +1,9 @@
+{
+  "name": "mawsim-cloudflare",
+  "private": true,
+  "description": "Outils de publication de l atelier sur Cloudflare (wrangler fige par package-lock.json)",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "wrangler": "4.166.0"
+  }
+}

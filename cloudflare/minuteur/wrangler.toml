@@ -1,8 +1,9 @@
 # Minuteur de l'atelier (voir src/index.js). Déployé une fois par l'utilisateur :
-#   npx wrangler deploy --config cloudflare/minuteur/wrangler.toml
+#   npm ci --prefix cloudflare, puis, dans cloudflare/ : npx wrangler deploy --config minuteur/wrangler.toml
 # puis ses deux secrets, rangés par l'utilisateur (jamais dans ce dépôt) :
-#   npx wrangler secret put GITHUB_TOKEN --config cloudflare/minuteur/wrangler.toml
-#   npx wrangler secret put DEPOT --config cloudflare/minuteur/wrangler.toml
+#   npx wrangler secret put GITHUB_TOKEN --config minuteur/wrangler.toml
+#   npx wrangler secret put DEPOT --config minuteur/wrangler.toml
+# (npx prend alors le wrangler figé par cloudflare/package-lock.json.)
 name = "mawsim-minuteur"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
@@ -16,6 +17,9 @@ crons = ["*/5 * * * *"]
 
 [vars]
 SOURCE = "https://openmeteo.s3.us-west-2.amazonaws.com/data_spatial"
+# Le modèle principal, le même que MODELE dans vent.yml, et celui de CAMS.
+MODELE = "dwd_icon"
+MODELE_CAMS = "cams_global"
 GITHUB_API = "https://api.github.com"
 BRANCHE = "main"
 WORKFLOW = "vent.yml"

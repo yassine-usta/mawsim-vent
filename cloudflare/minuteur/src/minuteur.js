@@ -15,7 +15,7 @@
 //
 // Secrets du Worker (rangés par l'utilisateur, jamais dans le dépôt) : GITHUB_TOKEN (jeton limité au dépôt de
 // l'atelier, droit Actions en lecture et écriture) et DEPOT ("propriétaire/nom" du dépôt).
-// Variables (wrangler.toml) : SOURCE, GITHUB_API, BRANCHE, WORKFLOW.
+// Variables (wrangler.toml) : SOURCE, MODELE (celui de vent.yml), MODELE_CAMS, GITHUB_API, BRANCHE, WORKFLOW.
 
 export const MAX_ESSAIS = 2;
 export const FENETRE_HEURES = 12;
@@ -105,8 +105,8 @@ export async function tour(env, maintenant = new Date()) {
   if (!env.GITHUB_TOKEN || !env.DEPOT) throw new Error("secrets GITHUB_TOKEN et DEPOT absents");
   const workflow = `${env.GITHUB_API}/repos/${env.DEPOT}/actions/workflows/${env.WORKFLOW}`;
   const [icon, cams, index, liste] = await Promise.all([
-    lireOuNull(fetch(`${env.SOURCE}/dwd_icon/latest.json`), "latest.json d'ICON"),
-    lireOuNull(fetch(`${env.SOURCE}/cams_global/latest.json`), "latest.json de CAMS"),
+    lireOuNull(fetch(`${env.SOURCE}/${env.MODELE}/latest.json`), "latest.json d'ICON"),
+    lireOuNull(fetch(`${env.SOURCE}/${env.MODELE_CAMS}/latest.json`), "latest.json de CAMS"),
     lireOuNull(env.INDEX.fetch("https://index/index.json"), "index publié"),
     // Les passages ne sont pas facultatifs : sans eux, on ne sait pas si un passage tourne déjà.
     fetch(`${workflow}/runs?per_page=30`, { headers: enTetesGithub(env) }).then((r) => lireJson(r, "liste des passages")),

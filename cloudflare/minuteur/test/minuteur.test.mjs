@@ -108,14 +108,14 @@ function fauxServeurs({ latest, cams, publie, passages, statutLancement = 204 })
   const repondre = (corps, status = 200) => new Response(JSON.stringify(corps), { status, headers: { "Content-Type": "application/json" } });
   globalThis.fetch = async (url, options = {}) => {
     appels.push({ url: String(url), options });
-    if (url.endsWith("/dwd_icon/latest.json")) return repondre(latest);
-    if (url.endsWith("/cams_global/latest.json")) return repondre(cams);
-    if (url.includes("/runs?")) return repondre({ workflow_runs: passages });
+    if (url.endsWith("/modele_essai/latest.json")) return repondre(latest);
+    if (url.endsWith("/cams_essai/latest.json")) return repondre(cams);
+    if (url.includes("/runs?")) return passages instanceof Response ? passages : repondre({ workflow_runs: passages });
     if (url.endsWith("/dispatches")) return new Response(null, { status: statutLancement });
     throw new Error(`adresse inattendue : ${url}`);
   };
   const env = {
-    SOURCE: "https://source.test/data_spatial", GITHUB_API: "https://github.test", BRANCHE: "main", WORKFLOW: "vent.yml",
+    SOURCE: "https://source.test/data_spatial", MODELE: "modele_essai", MODELE_CAMS: "cams_essai", GITHUB_API: "https://github.test", BRANCHE: "main", WORKFLOW: "vent.yml",
     GITHUB_TOKEN: "jeton-de-test", DEPOT: "proprietaire/depot",
     INDEX: { fetch: async () => (publie ? repondre(publie) : new Response("absent", { status: 404 })) },
   };
@@ -156,4 +156,26 @@ test("l'entrée du Worker n'exporte que son gestionnaire (workerd refuse tout au
   const entree = await import("../src/index.js");
   assert.deepEqual(Object.keys(entree), ["default"]);
   assert.equal(typeof entree.default.scheduled, "function");
+});
+
+test("le modèle lu est celui des variables du Worker, pas une valeur écrite dans le code", async () => {
+  const { appels, env } = fauxServeurs({ latest: icon("2026-11-22T06:00:00Z"), cams: CAMS, publie: index("2026-11-22T06:00Z"), passages: [] });
+  await tour(env, MAINTENANT);
+  assert.ok(appels.some((a) => a.url === "https://source.test/data_spatial/modele_essai/latest.json"));
+  assert.ok(appels.some((a) => a.url === "https://source.test/data_spatial/cams_essai/latest.json"));
+});
+
+for (const statut of [401, 403, 500]) {
+  test(`une liste des passages en erreur (${statut}) arrête le tour sans rien lancer`, async () => {
+    const erreur = new Response("refus", { status: statut });
+    const { appels, env } = fauxServeurs({ latest: icon("2026-11-22T06:00:00Z"), cams: CAMS, publie: index("2026-11-22T00:00Z"), passages: erreur });
+    await assert.rejects(tour(env, MAINTENANT), new RegExp(`liste des passages : ${statut}`));
+    assert.ok(!appels.some((a) => a.url.endsWith("/dispatches")));
+  });
+}
+
+test("des passages sans titre ou mal datés ne comptent pas comme essais et ne font pas planter", () => {
+  const passages = [{ status: "completed", conclusion: "failure" }, { status: "completed", display_title: "Vent, icon 2026-11-22T06:00Z", created_at: "pas une date" }];
+  const d = decider({ icon: icon("2026-11-22T06:00:00Z"), cams: CAMS, index: index("2026-11-22T00:00Z"), passages, maintenant: MAINTENANT });
+  assert.equal(d.action, "lancer");
 });
