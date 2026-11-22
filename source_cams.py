@@ -33,7 +33,7 @@ BASE = 0.5  # maille de travail : la plus fine des tuiles
 LEVELS = (1.0, 0.5)
 ROWS, COLS = 451, 900
 HOURLY_HOURS = 48  # heure par heure jusque-là (depuis le calcul du vent), puis toutes les trois heures
-CONSUMERS = ("poussiere", "uv")  # les familles qui lisent ce fichier : le dernier à finir l'efface
+CONSUMERS = ("poussiere", "uv")  # les familles de CAMS : celles qui lisent ce fichier
 
 
 class Plan:
@@ -64,6 +64,10 @@ def wanted_times(valid_times, start, parse_time):
     return kept
 
 
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc)
+
+
 def plan(ctx):
     """Le plan du passage, une seule fois (les familles de CAMS le partagent). Rend None si CAMS n'a pas de calcul complet
     ou ne répond pas : les familles sont alors laissées, le reste est publié."""
@@ -73,7 +77,7 @@ def plan(ctx):
     result = None
     try:
         latest = tools.fetch_json(f"{tools.SOURCE}/{MODEL}/latest.json")
-        received = ctx.now or dt.datetime.now(dt.timezone.utc)
+        received = now_utc()  # l'heure de la lecture : ctx.now ne sert qu'aux essais des autres familles
         if latest.get("completed", False):
             run = tools.parse_time(latest["reference_time"])
             times = wanted_times(latest["valid_times"], ctx.run or run, tools.parse_time)
@@ -143,11 +147,14 @@ def resample(field):
 
 
 def release(ctx, name, path, valid):
-    """La famille [name] a fini avec ce fichier. Sans --cache, il est effacé quand toutes les familles de CAMS qui le lisent
-    l'ont lu (la poussière ne lit que les heures de trois en trois : l'UV est seul à lire les autres)."""
+    """La famille [name] a fini avec ce fichier. Sans --cache, il est effacé quand toutes les familles de CAMS qui doivent le
+    lire l'ont lu : celles que ce passage a vraiment demandées (ctx.shared["families"], posé par run_families) et dont les
+    heures comprennent [valid] (la poussière ne lit que les heures de trois en trois, et --limit raccourcit les listes)."""
     used = ctx.shared.setdefault("cams_used", {}).setdefault(path, set())
     used.add(name)
-    readers = set(CONSUMERS) if valid.hour % 3 == 0 else {"uv"}
+    cams = ctx.shared.get("cams_plan")
+    asked = [module for module in ctx.shared.get("families", ()) if module.NAME in CONSUMERS]
+    readers = {module.NAME for module in asked if cams is not None and valid in family_times(ctx, cams, module)} or {name}
     if not ctx.keep_files and used >= readers and os.path.exists(path):
         os.remove(path)
 

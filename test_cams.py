@@ -197,9 +197,9 @@ class TestPassage:
             assert entry["source_modified"] == "2026-11-21T10:27Z"
             assert entry["model"] == "cams_global"
         assert not os.path.exists(os.path.join(ctx.out, "d", "2026112107"))  # pas de poussière à 7 h
-        # les fichiers de CAMS sont effacés quand toutes les familles qui les lisent les ont lus ; avec --limit 2, le
-        # fichier de 9 h n'est lu que par la poussière (l'UV s'arrête à 7 h) : il reste
-        assert os.listdir(ctx.work) == ["cams_global-2026112100-2026112109.om"]
+        # les fichiers de CAMS sont effacés quand toutes les familles qui doivent les lire les ont lus (celui de 9 h n'est
+        # lu que par la poussière : l'UV s'arrête à 7 h avec --limit 2)
+        assert os.listdir(ctx.work) == []
 
     def test_pixels_decode_to_the_source_values(self, tmp_path, monkeypatch):
         install_fake_cams(monkeypatch)
@@ -222,10 +222,68 @@ class TestPassage:
         right = tile(ctx, "d", "2026112106", 1, "0-1.png")
         assert np.array_equal(left[:, -1], right[:, 0])
 
-    def test_one_family_alone_works(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("name", ["uv", "poussiere"])
+    def test_one_family_alone_works_and_leaves_no_file(self, tmp_path, monkeypatch, name):
         install_fake_cams(monkeypatch)
+        ctx = make_context(tmp_path, limit=2)
+        assert prepare.run_families(ctx, prepare.load_families([name])).keys() == {name}
+        assert os.listdir(ctx.work) == []
+
+    def test_with_the_cache_the_files_stay(self, tmp_path, monkeypatch):
+        install_fake_cams(monkeypatch)
+        ctx = make_context(tmp_path, limit=1, keep_files=True)
+        prepare.run_families(ctx, prepare.load_families(["poussiere", "uv"]))
+        assert len(os.listdir(ctx.work)) == 1
+
+    def test_received_is_the_time_cams_was_read_not_the_clock_of_the_trials(self, tmp_path, monkeypatch):
+        install_fake_cams(monkeypatch)
+        monkeypatch.setattr(source_cams, "now_utc", lambda: at("2026-11-21T10:40"))
+        ctx = make_context(tmp_path, limit=1, now=at("2026-01-01T00:00"))
+        entries = prepare.run_families(ctx, prepare.load_families(["poussiere", "uv"]))
+        assert entries["uv"]["received"] == entries["poussiere"]["received"] == "2026-11-21T10:40Z"
+
+    def test_source_modified_is_absent_when_cams_does_not_give_it(self, tmp_path, monkeypatch):
+        latest = cams_latest()
+        del latest["last_modified_time"]
+        install_fake_cams(monkeypatch, latest=latest)
         ctx = make_context(tmp_path, limit=1)
-        assert prepare.run_families(ctx, prepare.load_families(["uv"])).keys() == {"uv"}
+        entry = prepare.run_families(ctx, prepare.load_families(["uv"]))["uv"]
+        assert "source_modified" not in entry and entry["run"] == "2026-11-21T00:00Z"
+
+    def test_the_180_degree_column_repeats_minus_180(self, tmp_path, monkeypatch):
+        fields = cams_fields()
+        fields["dust"] = fields["dust"] + np.random.default_rng(3).random(fields["dust"].shape).astype(np.float32) * 400.0
+        install_fake_cams(monkeypatch, fields=fields)
+        ctx = make_context(tmp_path, limit=1)
+        prepare.run_families(ctx, prepare.load_families(["poussiere"]))
+        for level, cols in ((0, 2), (1, 4)):
+            for row in range(2 if level else 1):
+                last = tile(ctx, "d", "2026112106", level, f"{row}-{cols - 1}.png")[:, -1]
+                first = tile(ctx, "d", "2026112106", level, f"{row}-0.png")[:, 0]
+                assert np.array_equal(last, first), (level, row)
+
+    def spike_site(self, tmp_path, monkeypatch, row, col):
+        fields = {name: np.zeros((source_cams.ROWS, source_cams.COLS), dtype=np.float32) for name in cams_fields()}
+        fields["dust"][row, col] = 3425.0
+        install_fake_cams(monkeypatch, fields=fields)
+        ctx = make_context(tmp_path, limit=1)
+        prepare.run_families(ctx, prepare.load_families(["poussiere"]))
+        return ctx
+
+    def test_an_isolated_storm_peak_on_a_node_keeps_its_maximum_at_level_1_and_a_ninth_at_level_0(self, tmp_path, monkeypatch):
+        # maille source (5, 5) = 88° S, 178° O = point (4, 4) de la maille de 0,5° : il tombe pile sur un noeud
+        ctx = self.spike_site(tmp_path, monkeypatch, 5, 5)
+        level1 = tile(ctx, "d", "2026112106", 1, "0-0.png")[:, :, 0]
+        assert poussiere.decode_dust(level1.max()) == pytest.approx(3425.0, rel=0.02)
+        level0 = tile(ctx, "d", "2026112106", 0, "0-0.png")[:, :, 0]
+        # le niveau 0 est la moyenne 3 x 3 autour de chaque point : un pic d'un seul point en garde un neuvième
+        assert poussiere.decode_dust(level0.max()) == pytest.approx(3425.0 / 9, rel=0.03)
+
+    def test_an_isolated_peak_between_nodes_loses_part_of_its_maximum_at_level_1(self, tmp_path, monkeypatch):
+        # maille source (6, 6) : à 0,25 maille du noeud (5, 5) de la maille de 0,5° : poids 0,75 par axe, soit 0,5625
+        ctx = self.spike_site(tmp_path, monkeypatch, 6, 6)
+        level1 = tile(ctx, "d", "2026112106", 1, "0-0.png")[:, :, 0]
+        assert poussiere.decode_dust(level1.max()) == pytest.approx(3425.0 * 0.5625, rel=0.03)
 
     def test_an_incomplete_calculation_leaves_the_families(self, tmp_path, monkeypatch, capsys):
         install_fake_cams(monkeypatch, latest=cams_latest(completed=False))

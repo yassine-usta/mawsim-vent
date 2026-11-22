@@ -85,6 +85,7 @@ def run_families(ctx, modules):
     Les familles horaires d'ICON passent d'abord, ensemble (un téléchargement par heure) ; les autres suivent, chacune
     pour soi. Une famille autonome qui échoue est laissée : le reste est publié quand même."""
     entries = {}
+    ctx.shared["families"] = modules  # les familles de ce passage (source_cams.py en déduit qui lit encore ses fichiers)
     hourly = [module for module in modules if hasattr(module, "write_hour")]
     if hourly:
         done = source_icon.run_hours(ctx, hourly)
