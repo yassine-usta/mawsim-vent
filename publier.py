@@ -2,7 +2,6 @@
 
 Usage : python publier.py SITE --cible github-pages
         python publier.py SITE --cible cloudflare [--dossier ENVOI] [--sans-envoi]
-        python publier.py SITE --cible cloudflare --gardees   (familles faites une fois, voir plus bas)
         python publier.py SITE --verifier        (vérifie seulement, ne publie nulle part)
 
 L'étape fait deux choses :
@@ -23,12 +22,16 @@ Cloudflare (fichiers statiques des Workers, offre gratuite) : un Worker par fami
     tuile est le champ "base" de son entrée d'index suivi de son gabarit "path" rempli. Ces deux champs, "base" et
     "fingerprint" (l'empreinte des tuiles de la famille), ne sont ajoutés qu'à l'index publié sur Cloudflare.
   - Les tuiles publiées sont celles de la préparation, octet pour octet (liens durs ou copies du dossier du site).
-  - Envoi par wrangler : les familles d'abord, l'index en dernier. Une famille dont l'empreinte n'a pas changé depuis
-    l'index en ligne n'est pas renvoyée (le feu dans la journée). Si l'envoi d'une famille échoue, l'index garde son
-    entrée en ligne (son Worker sert encore ces tuiles-là) ; si c'est le vent, l'index n'est pas renvoyé du tout.
-  - Familles faites une fois (par exemple un relief) : leur entrée d'index porte "kept": true. Elles sont publiées une
-    fois par `--gardees` (le dossier ne contient qu'elles) ; ensuite chaque passage reprend leur entrée de l'index en
-    ligne sans toucher à leur Worker.
+  - Une famille nouvelle a son Worker d'elle-même ("mawsim-<clé d'index>"). Garde : une famille de plus de
+    MARGE_FICHIERS fichiers (15 000, sous les 20 000 permis) arrête tout avant le premier envoi. Ce jour-là, on la
+    découpera par niveaux (README, "Publication").
+  - Envoi par wrangler : les familles d'abord, l'index en dernier, toujours. Une famille dont l'empreinte n'a pas changé
+    depuis l'index en ligne n'est pas renvoyée (le feu dans la journée). Si l'envoi d'une famille échoue (le vent
+    compris), l'index publié garde son entrée en ligne, que son Worker sert encore : l'index ne cite jamais une heure
+    absente, sauf pendant les minutes de l'envoi, et seulement des heures déjà passées.
+  - Familles faites une fois (par exemple un relief, dans son propre Worker, envoyé seulement quand on le refait) : leur
+    entrée d'index porte "kept": true, et chaque passage la reprend de l'index en ligne sans toucher à leur Worker.
+    Leur publication elle-même reste à écrire.
   - Variables d'environnement : CLOUDFLARE_API_TOKEN et CLOUDFLARE_ACCOUNT_ID (lues par wrangler), et
     CLOUDFLARE_SOUS_DOMAINE (par exemple "exemple.workers.dev") pour les adresses des Workers. Aucune n'est écrite
     dans ce dépôt public.
@@ -95,20 +98,6 @@ def check_site(site):
     return problems
 
 
-def check_kept_site(site):
-    """Un dossier de familles faites une fois (--gardees) : des couches seulement, toutes "kept", tuiles présentes."""
-    index, problem = read_index(site)
-    if problem:
-        return [problem]
-    layers = index.get("layers")
-    if "path" in index or not isinstance(layers, dict) or not layers:
-        return ["index.json : il faut des couches seulement (pas de vent à la racine)"]
-    problems = [f"{key} : pas marquée \"kept\": true" for key, entry in layers.items() if not entry.get("kept")]
-    for key, entry in layers.items():
-        check_family(site, key, entry, problems)
-    return problems
-
-
 def github_pages(site, options=None):
     """GitHub Pages est publié par les actions du workflow : rien à écrire dans le dossier."""
     return 0
@@ -125,6 +114,7 @@ PREFIXE = "mawsim-"
 INDEX_WORKER = PREFIXE + "index"
 # Limites des fichiers statiques des Workers, offre gratuite (https://developers.cloudflare.com/workers/platform/limits/).
 LIMITE_FICHIERS = 20000
+MARGE_FICHIERS = 15000  # garde : de la place pour le pas horaire de 78 h et les familles qui grossissent
 LIMITE_OCTETS = 25 * 1024 * 1024
 DATE_COMPATIBILITE = "2026-11-01"
 WRANGLER = ("npx", "--yes", "wrangler@4.166.0")  # 4.34 au moins pour la limite de 20 000 fichiers
@@ -211,8 +201,9 @@ def bundle_family(site, envoi, key, entry, suffix):
     files = family_files(site, folder)
     if not files:
         raise ValueError(f"{label} : aucun fichier dans {folder}/")
-    if len(files) + 1 > LIMITE_FICHIERS:  # + _headers
-        raise ValueError(f"{label} : {len(files)} fichiers, plus que les {LIMITE_FICHIERS} d'un Worker")
+    if len(files) + 1 > MARGE_FICHIERS:  # + _headers
+        raise ValueError(f"{label} : {len(files)} fichiers, plus que la marge de {MARGE_FICHIERS} sous les {LIMITE_FICHIERS} "
+                         "d'un Worker ; la découper par niveaux (README, \"Publication\")")
     total = 0
     for relative in files:
         size = os.path.getsize(os.path.join(site, *relative.split("/")))
@@ -296,8 +287,9 @@ def print_report(families, carried):
 
 
 def publish_families(families, index, live, deploy):
-    """Envoie les familles et tient leur entrée à jour dans [index] ; rend les noms des familles en échec."""
-    failures = []
+    """Envoie les familles et tient leur entrée à jour dans [index]. Rend les noms des familles en échec, et si l'index
+    reste publiable (faux seulement si le vent échoue sans entrée en ligne à garder)."""
+    failures, publishable = [], True
     for family in families:
         key = family["key"]
         online = get_entry(live, key)
@@ -308,21 +300,21 @@ def publish_families(families, index, live, deploy):
         if deploy(family["folder"]):
             continue
         failures.append(family["label"])
-        if key is None:
-            continue  # le vent : l'index ne sera pas renvoyé (voir cloudflare)
         if online:
             print(f"{family['worker']} : échec, l'index garde l'entrée en ligne", flush=True)
             set_entry(index, key, online)
+        elif key is None:
+            publishable = False
         else:
             print(f"{family['worker']} : échec, famille retirée de l'index", flush=True)
             index.get("layers", {}).pop(key, None)
-    return failures
+    return failures, publishable
 
 
 def cloudflare(site, options=None, deploy=wrangler_deploy, live=None):
     """Range le site par Worker dans options.dossier, puis l'envoie (sauf avec options.sans_envoi). Rend 0 si tout est
     en ligne, 1 sinon. [deploy] et [live] servent aux essais, sans réseau."""
-    options = options or argparse.Namespace(dossier="cloudflare-envoi", sans_envoi=True, gardees=False)
+    options = options or argparse.Namespace(dossier="cloudflare-envoi", sans_envoi=True)
     suffix = os.environ.get("CLOUDFLARE_SOUS_DOMAINE", "").strip().strip("/")
     if not suffix:
         if not options.sans_envoi:
@@ -345,15 +337,6 @@ def cloudflare(site, options=None, deploy=wrangler_deploy, live=None):
 
     if live is None and not options.sans_envoi:
         live = fetch_live(suffix)
-    if options.gardees:
-        # Les familles faites une fois s'ajoutent à l'index en ligne, qui doit donc être lisible.
-        if not live:
-            print("--gardees demande l'index en ligne : rien n'est envoyé.")
-            return 1
-        merged = json.loads(json.dumps(live))
-        for key, entry in index["layers"].items():
-            merged.setdefault("layers", {})[key] = entry
-        index = merged
     carried = carry_kept(index, live)
     print_report(families, carried)
 
@@ -361,9 +344,10 @@ def cloudflare(site, options=None, deploy=wrangler_deploy, live=None):
         write_index(envoi, index)
         print(f"Dossier d'envoi prêt, rien n'est envoyé : {envoi}")
         return 0
-    failures = publish_families(families, index, live, deploy)
-    if any(family["key"] is None and family["label"] in failures for family in families):
-        print("Le vent n'a pas pu être envoyé : l'index en ligne reste celui d'avant.")
+    failures, publishable = publish_families(families, index, live, deploy)
+    if not publishable:
+        print("Le vent n'a pas pu être envoyé, et aucun index en ligne ne dit ce que sert son Worker : l'index n'est pas "
+              "renvoyé.")
         return 1
     if not deploy(write_index(envoi, index)):
         print("L'index n'a pas pu être envoyé : l'app lit encore celui d'avant.")
@@ -388,13 +372,9 @@ def main(argv=None):
     group.add_argument("--verifier", action="store_true", help="vérifier seulement")
     parser.add_argument("--dossier", default="cloudflare-envoi", help="cloudflare : où ranger les Workers à envoyer")
     parser.add_argument("--sans-envoi", action="store_true", help="cloudflare : ranger sans rien envoyer (essais)")
-    parser.add_argument("--gardees", action="store_true",
-                        help="cloudflare : publier des familles faites une fois (\"kept\": true), ajoutées à l'index en ligne")
     args = parser.parse_args(argv)
-    if args.gardees and args.cible != "cloudflare":
-        parser.error("--gardees va avec --cible cloudflare")
 
-    problems = check_kept_site(args.site) if args.gardees else check_site(args.site)
+    problems = check_site(args.site)
     if problems:
         print("Le site n'est pas publiable :")
         for problem in problems:

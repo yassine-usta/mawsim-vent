@@ -107,8 +107,8 @@ def suffix(monkeypatch):
     return SUFFIX
 
 
-def options(tmp_path, sans_envoi=False, gardees=False):
-    return argparse.Namespace(dossier=str(tmp_path / "envoi"), sans_envoi=sans_envoi, gardees=gardees)
+def options(tmp_path, sans_envoi=False):
+    return argparse.Namespace(dossier=str(tmp_path / "envoi"), sans_envoi=sans_envoi)
 
 
 class FakeWrangler:
@@ -251,7 +251,22 @@ def test_a_failed_layer_without_online_entry_leaves_the_index(site, tmp_path, su
     assert "sky" not in layers and "air" in layers
 
 
-def test_a_failed_wind_never_sends_the_index(site, tmp_path, suffix):
+def test_a_failed_wind_keeps_its_online_entry(site, tmp_path, suffix):
+    """Le vent raté : l'index part quand même, avec les champs du vent en ligne (que sert encore son Worker) et les
+    autres familles du nouveau calcul."""
+    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
+    live = published_index(options(tmp_path).dossier)
+    live.update(run="2026-11-21T00:00Z", times=["2026-11-21T00:00Z"], fingerprint="ancienne", created="2026-11-21T04:00Z")
+    live["layers"]["air"]["fingerprint"] = "ancienne"
+    wrangler = FakeWrangler(failing={"mawsim-vent"})
+    assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live=live) == 1
+    assert wrangler.sent[-1] == "mawsim-index"
+    index = published_index(options(tmp_path).dossier)
+    assert (index["run"], index["times"], index["fingerprint"]) == ("2026-11-21T00:00Z", ["2026-11-21T00:00Z"], "ancienne")
+    assert index["layers"]["air"]["run"] == "2026-11-21T06:00Z"  # l'air, envoyé, est celui du nouveau calcul
+
+
+def test_a_failed_wind_without_online_entry_never_sends_the_index(site, tmp_path, suffix):
     wrangler = FakeWrangler(failing={"mawsim-vent"})
     assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
     assert "mawsim-index" not in wrangler.sent
@@ -261,8 +276,8 @@ def test_a_failed_index_is_a_failure(site, tmp_path, suffix):
     assert publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(failing={"mawsim-index"}), live={}) == 1
 
 
-def test_a_family_over_the_file_limit_sends_nothing(site, tmp_path, suffix, monkeypatch):
-    monkeypatch.setattr(publier, "LIMITE_FICHIERS", 10)
+def test_a_family_over_the_margin_sends_nothing(site, tmp_path, suffix, monkeypatch):
+    monkeypatch.setattr(publier, "MARGE_FICHIERS", 10)
     wrangler = FakeWrangler()
     assert publier.cloudflare(site, options(tmp_path), deploy=wrangler, live={}) == 1
     assert wrangler.sent == []
@@ -300,39 +315,20 @@ def test_a_kept_family_is_carried_from_the_online_index(site, tmp_path, suffix):
     assert "mawsim-relief" not in wrangler.sent
 
 
-def make_kept_site(tmp_path):
-    folder = tmp_path / "relief"
-    tile = folder / "k" / "2026010100" / "0" / "0-0.png"
-    tile.parent.mkdir(parents=True)
-    tile.write_bytes(b"\x89PNG relief")
-    entry = {key: value for key, value in kept_entry().items() if key not in ("base", "fingerprint")}
-    (folder / "index.json").write_text(json.dumps({"layers": {"relief": entry}}), encoding="utf-8")
-    return str(folder)
-
-
-def test_kept_families_are_published_once_into_the_online_index(site, tmp_path, suffix):
-    publier.cloudflare(site, options(tmp_path), deploy=FakeWrangler(), live={})
-    live = published_index(options(tmp_path).dossier)
-    kept = make_kept_site(tmp_path)
-    assert publier.check_kept_site(kept) == []
-    wrangler = FakeWrangler()
-    assert publier.cloudflare(kept, options(tmp_path / "k", gardees=True), deploy=wrangler, live=live) == 0
-    assert wrangler.sent == ["mawsim-relief", "mawsim-index"]
-    index = published_index(options(tmp_path / "k").dossier)
-    assert index["layers"]["relief"]["base"] == f"https://mawsim-relief.{SUFFIX}/"
-    assert index["run"] == live["run"] and index["layers"]["air"] == live["layers"]["air"]
-
-
-def test_kept_families_need_the_online_index(tmp_path, suffix):
-    wrangler = FakeWrangler()
-    assert publier.cloudflare(make_kept_site(tmp_path), options(tmp_path, gardees=True), deploy=wrangler, live=None) == 1
-    assert wrangler.sent == []
-
-
-def test_a_kept_site_must_hold_kept_layers_only(site, tmp_path):
-    assert publier.check_kept_site(site)  # un site ordinaire (vent à la racine) est refusé
-    kept = make_kept_site(tmp_path)
-    rewrite_index(kept, lambda index: index["layers"]["relief"].pop("kept"))
-    assert publier.check_kept_site(kept) == ["relief : pas marquée \"kept\": true"]
-    with pytest.raises(SystemExit):
-        publier.main([kept, "--cible", "github-pages", "--gardees"])
+def test_the_biggest_pass_fits_the_margin():
+    """Au plus gros passage prévu (pas horaire de 78 h, sept jours et demi, feu sur dix jours), chaque famille tient
+    sous la marge de 15 000 fichiers, elle-même sous les 20 000 d'un Worker."""
+    assert publier.MARGE_FICHIERS < publier.LIMITE_FICHIERS == 20000
+    icon_hours = 79 + len(range(81, 181, 3))  # 113 : de 0 à 78 h heure par heure, puis de trois en trois
+    world = {"icon": 2 + 8 + 32, "cams": 2 + 8, "sea": 2 + 8 + 32 + 288}  # tuiles par heure, tous niveaux
+    biggest = {
+        "vent, air, ciel, nuages, précipitations, soleil": icon_hours * world["icon"],
+        "uv (si CAMS passe aussi à 78 h)": (79 + len(range(81, 121, 3))) * world["cams"],
+        "poussière": len(range(0, 121, 3)) * world["cams"],
+        "eau (4 heures)": 4 * world["sea"],
+        "courants (13 heures)": 13 * world["sea"],
+        "feu (10 jours)": 10 * world["sea"],
+    }
+    for name, count in biggest.items():
+        assert count + 1 <= publier.MARGE_FICHIERS, f"{name} : {count} fichiers"
+    assert max(biggest.values()) == 4746
